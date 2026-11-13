@@ -754,6 +754,11 @@ fn internal_exec_cmd<T: AsRef<OsStr> + Debug, U: AsRef<OsStr> + Debug>(
 
 pub fn exec_timeout(cmd: &mut Command, time_limit: Duration) -> Option<CommandOutput> {
     let start = Instant::now();
+    // Run the command in its own process group so that, on timeout, helper
+    // processes it spawned (e.g. git clean filters such as git-lfs) can be
+    // terminated too instead of being orphaned and left running to completion.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
     let process = match cmd.spawn() {
         Ok(process) => process,
         Err(error) => {
@@ -761,6 +766,8 @@ pub fn exec_timeout(cmd: &mut Command, time_limit: Duration) -> Option<CommandOu
             return None;
         }
     };
+    #[cfg(unix)]
+    let process_group = process.id();
     match process
         .controlled_with_output()
         .time_limit(time_limit)
@@ -801,6 +808,14 @@ pub fn exec_timeout(cmd: &mut Command, time_limit: Duration) -> Option<CommandOu
             })
         }
         Ok(None) => {
+            #[cfg(unix)]
+            if let Ok(pgid) = i32::try_from(process_group) {
+                // Best effort: the group may already be gone.
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pgid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
             log::warn!("Executing command {:?} timed out.", cmd.get_program());
             log::warn!(
                 "You can set command_timeout in your config to a higher value to allow longer-running commands to keep executing."
@@ -937,6 +952,22 @@ impl PathExt for Path {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn exec_timeout_kills_child_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        // A grandchild that would write the marker if it outlived the timeout.
+        let script = format!("(sleep 1; echo done > '{}') & wait", marker.display());
+        let mut cmd = create_command("sh").unwrap();
+        cmd.args(["-c", &script]);
+        let out = exec_timeout(&mut cmd, Duration::from_millis(200));
+        assert!(out.is_none());
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!marker.exists(), "grandchild survived the timeout");
+        dir.close().unwrap();
+    }
+
     use tempfile::tempdir;
 
     use super::*;
