@@ -283,6 +283,17 @@ const CMDEXE_INIT: &str = include_str!("starship.lua");
 mod tests {
     use super::*;
     #[test]
+    fn pwsh_init_trims_trailing_newlines_from_prompt() {
+        let trim = r#"$promptText = $promptText.TrimEnd("`r", "`n")"#;
+        let trim_pos = PWSH_INIT.find(trim).expect("prompt trim missing");
+        let extra_lines_pos = PWSH_INIT
+            .find("-ExtraPromptLineCount")
+            .expect("extra line count missing");
+        // The trim must happen before the extra line count is computed
+        assert!(trim_pos < extra_lines_pos);
+    }
+
+    #[test]
     fn escape_pwsh() -> io::Result<()> {
         let starship_path = StarshipPath {
             native_path: PathBuf::from(r"C:\starship.exe"),
