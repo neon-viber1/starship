@@ -157,6 +157,10 @@ $null = New-Module starship {
             Invoke-Native -Executable ::STARSHIP:: -Arguments $arguments
         }
 
+        # Trailing newlines are dropped so the cursor stays on the last prompt line,
+        # matching bash and zsh where command substitution strips them.
+        $promptText = $promptText.TrimEnd("`r", "`n")
+
         # Set the number of extra lines in the prompt for PSReadLine prompt redraw.
         Set-PSReadLineOption -ExtraPromptLineCount ($promptText.Split("`n").Length - 1)
 

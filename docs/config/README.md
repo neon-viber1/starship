@@ -373,6 +373,12 @@ modules you explicitly add to the format will not be duplicated. Eg.
 format = '$all$directory$character'
 ```
 
+::: tip
+
+In PowerShell, trailing newline characters at the end of `format` are removed, as bash and zsh already do when they capture the prompt. To place the input on its own line, put `$line_break` before the input position instead of ending `format` with a newline.
+
+:::
+
 ## AWS
 
 The `aws` module shows the current AWS region and profile and an expiration timer when using temporary credentials.
