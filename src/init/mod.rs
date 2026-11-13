@@ -282,6 +282,13 @@ const CMDEXE_INIT: &str = include_str!("starship.lua");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xonsh_prompt_strips_trailing_newlines() {
+        let script = include_str!("starship.xsh");
+        assert!(script.contains("--cmd-duration=@(duration)).rstrip('\\n')"));
+    }
+
     #[test]
     fn escape_pwsh() -> io::Result<()> {
         let starship_path = StarshipPath {
