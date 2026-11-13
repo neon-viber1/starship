@@ -8,7 +8,9 @@ def starship_prompt():
     # but we can't use that function because of https://gitter.im/xonsh/xonsh?at=60e8832d82dd9050f5e0c96a
     jobs = sum(1 for job in __xonsh__.all_jobs.values() if job['obj'] and job['obj'].poll() is None)
     duration = round((last_cmd.ts[1] - last_cmd.ts[0]) * 1000) if last_cmd else 0
-    return $(::STARSHIP:: prompt --status=@(status) --jobs=@(jobs) --cmd-duration=@(duration))
+    # Like the command substitution used by other shells, drop trailing newlines so the
+    # cursor stays on the last prompt line.
+    return $(::STARSHIP:: prompt --status=@(status) --jobs=@(jobs) --cmd-duration=@(duration)).rstrip('\n')
 
 def starship_rprompt():
     last_cmd = __xonsh__.history[-1] if __xonsh__.history else None
