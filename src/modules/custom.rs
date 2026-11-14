@@ -822,4 +822,32 @@ mod tests {
 
         dir.close()
     }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn output_with_reset_keeps_module_style() -> io::Result<()> {
+        use nu_ansi_term::Color;
+        let dir = tempfile::tempdir()?;
+
+        let actual = ModuleRenderer::new("custom.test")
+            .path(dir.path())
+            .config(toml::toml! {
+                [custom.test]
+                format = "[a ]($style)[$output]($style)[ b]($style)"
+                style = "bg:blue"
+                command = "printf '\\033[32mNAV\\033[0m'"
+                shell = ["sh"]
+                when = true
+                ignore_timeout = true
+            })
+            .collect();
+        let bg = nu_ansi_term::Style::new()
+            .on(Color::Blue)
+            .prefix()
+            .to_string();
+        let expected = Some(format!("{bg}a \x1b[32mNAV\x1b[0m{bg} b\x1b[0m"));
+        assert_eq!(expected, actual);
+
+        dir.close()
+    }
 }
