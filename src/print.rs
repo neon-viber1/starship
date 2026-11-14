@@ -175,7 +175,7 @@ pub fn module(module_name: &str, args: Properties) {
 }
 
 pub fn get_module(module_name: &str, context: &Context) -> Option<String> {
-    modules::handle(module_name, context).map(|m| m.to_string())
+    handle_with_timeout(module_name, context).map(|m| m.to_string())
 }
 
 pub fn timings(args: Properties) {
@@ -350,15 +350,15 @@ fn handle_module<'a>(
     if ALL_MODULES.contains(&module) {
         // Write out a module if it isn't disabled
         if !context.is_module_disabled_in_config(module) {
-            modules.extend(modules::handle(module, context));
+            modules.extend(handle_with_timeout(module, context));
         }
     } else if module.starts_with("custom.") || module.starts_with("env_var.") {
         // custom.<name> and env_var.<name> are special cases and handle disabled modules themselves
-        modules.extend(modules::handle(module, context));
+        modules.extend(handle_with_timeout(module, context));
     } else if matches!(module, "custom" | "env_var") {
         // env var is a spacial case and may contain a top-level module definition
         if module == "env_var" {
-            modules.extend(modules::handle(module, context));
+            modules.extend(handle_with_timeout(module, context));
         }
 
         // Write out all custom modules, except for those that are explicitly set
@@ -376,7 +376,7 @@ fn handle_module<'a>(
                     if module == "env_var" && !config.is_table() {
                         None
                     } else if should_add_implicit_module(module, child, config, module_list) {
-                        Some(modules::handle(&format!("{module}.{child}"), context))
+                        Some(handle_with_timeout(&format!("{module}.{child}"), context))
                     } else {
                         None
                     }
@@ -877,5 +877,105 @@ mod test {
         let expected = "user profile";
         let actual = get_prompt(&context);
         assert_eq!(expected, actual);
+    }
+}
+
+/// Thread pool used to run modules under a time limit. It is separate from the global pool so
+/// that waiting for a module never blocks the threads that module's own parallel work needs,
+/// and so that an abandoned (hung) module does not starve the global pool.
+fn module_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(crate::num_rayon_threads().max(8))
+            .thread_name(|i| format!("starship-module-{i}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// Run `f` on the module pool and wait at most `timeout` for its result.
+/// On timeout the work is left running in the background and `None` is returned.
+/// A zero timeout disables the limit and runs `f` on the current thread.
+fn run_with_timeout<T: Send + 'static>(
+    timeout: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    if timeout.is_zero() {
+        return Some(f());
+    }
+    let Some(pool) = module_pool() else {
+        return Some(f());
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    pool.spawn(move || {
+        // The receiver may be gone if we timed out; ignore the error.
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(timeout).ok()
+}
+
+/// Like `modules::handle`, but gives up on modules that take longer than `module_timeout`.
+fn handle_with_timeout<'a>(module: &str, context: &'a Context) -> Option<Module<'a>> {
+    let timeout = Duration::from_millis(context.root_config.module_timeout);
+    if timeout.is_zero() {
+        return modules::handle(module, context);
+    }
+    let ctx_addr = std::ptr::from_ref(context) as usize;
+    let name = module.to_owned();
+    let worker_name = name.clone();
+    let result = run_with_timeout(timeout, move || {
+        // SAFETY: the context is only borrowed for the duration of the prompt. A worker that
+        // times out may outlive that borrow, but it is only ever abandoned while the process
+        // is about to print the prompt and exit, so the context is never dropped and reused
+        // while the worker still runs.
+        let ctx: &'static Context = unsafe { &*(ctx_addr as *const Context) };
+        modules::handle(&worker_name, ctx)
+    });
+    match result {
+        // SAFETY: shortens the lifetime back to the caller's borrow of the context.
+        Some(m) => unsafe { std::mem::transmute::<Option<Module<'static>>, Option<Module<'a>>>(m) },
+        None => {
+            log::warn!(
+                "Module '{name}' did not finish within module_timeout ({}ms) and was skipped. \
+                 You can set module_timeout in your config to a higher value (or 0 to disable it).",
+                context.root_config.module_timeout
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[test]
+    fn fast_closure_completes() {
+        assert_eq!(
+            run_with_timeout(Duration::from_millis(1000), || 42),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn slow_closure_is_cut_off() {
+        let start = std::time::Instant::now();
+        let r = run_with_timeout(Duration::from_millis(30), || {
+            std::thread::sleep(Duration::from_millis(2000));
+            1
+        });
+        assert_eq!(r, None);
+        assert!(start.elapsed() < Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn zero_timeout_disables_limit() {
+        let r = run_with_timeout(Duration::ZERO, || {
+            std::thread::sleep(Duration::from_millis(50));
+            7
+        });
+        assert_eq!(r, Some(7));
     }
 }
