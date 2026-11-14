@@ -741,6 +741,49 @@ mod test {
     }
 
     #[test]
+    fn kubernetes_requires_module_in_format() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let kubeconfig = dir.path().join("config");
+        std::fs::write(
+            &kubeconfig,
+            "apiVersion: v1
+clusters: []
+contexts:
+  - context:
+      namespace: test_namespace
+    name: dev.local.cluster.k8s
+current-context: dev.local.cluster.k8s
+kind: Config
+users: []
+",
+        )?;
+
+        for (format, shown) in [("$character", false), ("$kubernetes$character", true)] {
+            let mut config = toml::toml! {
+                add_newline = false
+                [character]
+                format = ">"
+                [kubernetes]
+                disabled = false
+                format = "on [⛵ $context \\($namespace\\)]($style) "
+            };
+            config.insert("format".to_owned(), format.into());
+            let mut context = default_context().set_config(config);
+            context.current_dir = dir.path().to_path_buf();
+            context
+                .env
+                .insert("KUBECONFIG", kubeconfig.to_string_lossy().into_owned());
+            let actual = get_prompt(&context);
+            assert_eq!(
+                actual.contains("dev.local.cluster.k8s"),
+                shown,
+                "format {format:?} gave {actual:?}"
+            );
+        }
+        dir.close()
+    }
+
+    #[test]
     fn custom_expands() -> std::io::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut context = default_context().set_config(toml::toml! {
