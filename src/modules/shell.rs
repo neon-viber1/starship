@@ -87,6 +87,33 @@ mod tests {
     }
 
     #[test]
+    fn test_conditional_indicator_format() {
+        let actual = ModuleRenderer::new("shell")
+            .shell(Shell::Bash)
+            .config(toml::toml! {
+                [shell]
+                disabled = false
+                format = "([$indicator]($style) )"
+            })
+            .collect();
+        assert_eq!(
+            Some(format!("{} ", Color::White.bold().paint("bsh"))),
+            actual
+        );
+
+        let actual = ModuleRenderer::new("shell")
+            .shell(Shell::Bash)
+            .config(toml::toml! {
+                [shell]
+                disabled = false
+                bash_indicator = ""
+                format = "([$indicator]($style) )"
+            })
+            .collect();
+        assert_eq!(None, actual);
+    }
+
+    #[test]
     fn test_bash_default_format() {
         let expected = Some(format!("{} ", Color::White.bold().paint("bsh")));
         let actual = ModuleRenderer::new("shell")

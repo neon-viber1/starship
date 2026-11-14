@@ -345,6 +345,14 @@ impl<'a> StringFormatter<'a> {
                         FormatElement::Conditional(format) => {
                             // Show the conditional format string if all the variables inside are not
                             // none or empty string.
+                            fn has_text(elements: &[FormatElement]) -> bool {
+                                elements.iter().any(|el| match el {
+                                    FormatElement::Text(t) => !t.is_empty(),
+                                    FormatElement::TextGroup(group) => has_text(&group.format),
+                                    _ => false,
+                                })
+                            }
+
                             fn should_show_elements<'a>(
                                 format_elements: &[FormatElement],
                                 variables: &'a VariableMapType<'a>,
@@ -362,6 +370,16 @@ impl<'a> StringFormatter<'a> {
                                                 .is_some_and(|result| match result {
                                                     // If the variable is a meta variable, also
                                                     // check the format string inside it.
+                                                    VariableValue::Meta(meta_elements)
+                                                        if meta_elements
+                                                            .get_variables()
+                                                            .is_empty() =>
+                                                    {
+                                                        // A meta variable without inner variables
+                                                        // (e.g. a plain `symbol`) is shown if it
+                                                        // has any non-empty text.
+                                                        has_text(meta_elements)
+                                                    }
                                                     VariableValue::Meta(meta_elements) => {
                                                         let meta_variables =
                                                             clone_without_meta(variables);
@@ -799,6 +817,29 @@ mod tests {
         let result = formatter.parse(None, None).unwrap();
         let mut result_iter = result.iter();
         match_next!(result_iter, " ", None);
+    }
+
+    #[test]
+    fn test_conditional_meta_variable_plain_text() {
+        let render = |symbol: &'static str| {
+            StringFormatter::new("([$symbol]($style) )")
+                .unwrap()
+                .map_meta(|var, _| match var {
+                    "symbol" => Some(symbol),
+                    _ => None,
+                })
+                .map_style(|var| match var {
+                    "style" => Some(Ok("bold red".to_string())),
+                    _ => None,
+                })
+                .parse(None, None)
+                .unwrap()
+        };
+        let result = render("sudo");
+        let mut result_iter = result.iter();
+        match_next!(result_iter, "sudo", Some(Color::Red.bold()));
+        match_next!(result_iter, " ", None);
+        assert!(render("").is_empty());
     }
 
     #[test]
