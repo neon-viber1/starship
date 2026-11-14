@@ -850,4 +850,28 @@ mod tests {
 
         dir.close()
     }
+
+    #[test]
+    fn plain_output_keeps_style_across_segments() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+
+        let actual = ModuleRenderer::new("custom.test")
+            .path(dir.path())
+            .config(toml::toml! {
+                [custom.test]
+                format = "[\u{f0a0} before output]($style)[ \u{f0a0} $output ]($style)[ after output]($style)"
+                style = "bg:blue"
+                command = "echo NAV"
+                when = true
+                ignore_timeout = true
+            })
+            .shell(Shell::Bash)
+            .collect();
+        let expected =
+            Some("\x1b[44m\u{f0a0} before output \u{f0a0} NAV  after output\x1b[0m".to_string());
+        // The module's style must be emitted once and cover all three segments.
+        assert_eq!(expected, actual);
+
+        dir.close()
+    }
 }
