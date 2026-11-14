@@ -16,10 +16,21 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     let git_repo = repo.open();
     let git_head = git_repo.head().ok()?;
 
-    let is_detached = git_head.is_detached();
-    if (config.only_detached && !is_detached) || git_head.is_unborn() {
+    if git_head.is_unborn() {
         return None;
     }
+
+    let show_tag = config.display_tag || !config.tag_disabled;
+    let show_hash = !config.only_detached || git_head.is_detached();
+
+    // When the hash is hidden, only render the module if there is a tag to show.
+    let early_tag = if show_hash {
+        None
+    } else if show_tag {
+        Some(git_tag(repo, &config)?)
+    } else {
+        return None;
+    };
 
     let parsed = StringFormatter::new(config.format).and_then(|formatter| {
         formatter
@@ -28,11 +39,14 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
                 _ => None,
             })
             .map(|variable| match variable {
-                "hash" => Some(Ok(git_hash(context.get_git_repo().ok()?, &config)?)),
-                "tag" if !config.tag_disabled => Some(Ok(format!(
+                "hash" if show_hash => Some(Ok(git_hash(context.get_git_repo().ok()?, &config)?)),
+                "tag" if show_tag => Some(Ok(format!(
                     "{}{}",
                     config.tag_symbol,
-                    git_tag(context.get_git_repo().ok()?, &config)?
+                    match &early_tag {
+                        Some(tag) => tag.clone(),
+                        None => git_tag(context.get_git_repo().ok()?, &config)?,
+                    }
                 ))),
                 _ => None,
             })
@@ -381,6 +395,81 @@ mod tests {
             assert_eq!(expected, actual);
             repo_dir.close()?;
         }
+        Ok(())
+    }
+
+    fn tagged_attached(config: toml::Table) -> io::Result<Option<String>> {
+        let repo_dir = fixture_repo(COMMON_GIT_PROVIDERS[0])?;
+        create_command("git")?
+            .args(["tag", "v1", "-m", "Testing tags"])
+            .current_dir(repo_dir.path())
+            .output()?;
+        let actual = ModuleRenderer::new("git_commit")
+            .config(config)
+            .path(repo_dir.path())
+            .collect();
+        repo_dir.close()?;
+        Ok(actual)
+    }
+
+    #[test]
+    fn display_tag_with_only_detached_on_branch() -> io::Result<()> {
+        let actual = tagged_attached(toml::toml! {
+            [git_commit]
+                display_tag = true
+                tag_symbol = ""
+        })?;
+        let expected = Some(format!("{} ", Color::Green.bold().paint("(v1)")));
+        assert_eq!(expected, actual);
+        Ok(())
+    }
+
+    #[test]
+    fn display_tag_false_with_only_detached_on_branch() -> io::Result<()> {
+        let actual = tagged_attached(toml::toml! {
+            [git_commit]
+                display_tag = false
+        })?;
+        assert_eq!(None, actual);
+        Ok(())
+    }
+
+    #[test]
+    fn display_tag_with_only_detached_on_untagged_branch() -> io::Result<()> {
+        let repo_dir = fixture_repo(COMMON_GIT_PROVIDERS[0])?;
+        let actual = ModuleRenderer::new("git_commit")
+            .config(toml::toml! {
+                [git_commit]
+                    display_tag = true
+            })
+            .path(repo_dir.path())
+            .collect();
+        assert_eq!(None, actual);
+        repo_dir.close()
+    }
+
+    #[test]
+    fn legacy_tag_disabled_false_with_only_detached_on_branch() -> io::Result<()> {
+        let actual = tagged_attached(toml::toml! {
+            [git_commit]
+                tag_disabled = false
+                tag_symbol = ""
+        })?;
+        let expected = Some(format!("{} ", Color::Green.bold().paint("(v1)")));
+        assert_eq!(expected, actual);
+        Ok(())
+    }
+
+    #[test]
+    fn display_tag_and_hash_when_not_only_detached() -> io::Result<()> {
+        let actual = tagged_attached(toml::toml! {
+            [git_commit]
+                only_detached = false
+                display_tag = true
+                tag_symbol = " "
+        })?;
+        let text = actual.unwrap();
+        assert!(text.contains(" v1)"), "{text}");
         Ok(())
     }
 

@@ -14,6 +14,8 @@ pub struct GitCommitConfig<'a> {
     pub only_detached: bool,
     pub disabled: bool,
     pub tag_symbol: &'a str,
+    pub display_tag: bool,
+    /// Deprecated: use `display_tag` instead.
     pub tag_disabled: bool,
     pub tag_max_candidates: usize,
 }
@@ -28,6 +30,7 @@ impl Default for GitCommitConfig<'_> {
             only_detached: true,
             disabled: false,
             tag_symbol: " 🏷  ",
+            display_tag: false,
             tag_disabled: true,
             tag_max_candidates: 0,
         }
