@@ -221,6 +221,12 @@ This is the list of prompt-wide configuration options.
 | `palettes`        | `{}`                           | Collection of color palettes that assign [colors](../advanced-config/#style-strings) to user-defined names. Note that color palettes cannot reference their own color definitions. |
 | `follow_symlinks` | `true`                         | Follows symlinks to check if they're directories; used in modules such as git.                                                                                                     |
 
+::: tip
+
+On case-insensitive filesystems (such as the default on macOS and Windows), file, folder and extension detection used by modules ignores letter case, so a `cargo.toml` file triggers the same modules as `Cargo.toml`.
+
+:::
+
 > [!TIP]
 > If you have symlinks to networked filesystems, consider setting
 > `follow_symlinks` to `false`.
