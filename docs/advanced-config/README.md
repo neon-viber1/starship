@@ -204,6 +204,26 @@ eval $(starship init bash)
 set +o functrace
 ```
 
+### Troubleshooting: exit status always shows success in Bash
+
+Starship reads the exit status of the last command (`$?`) when its `PROMPT_COMMAND` hook runs.
+Any other `PROMPT_COMMAND` entry that runs **before** Starship and does not preserve `$?`
+(for example a function whose last command is `echo`, or one added by `z.lua`, `fzf`
+or a terminal's shell integration) resets the status to `0`, so the `character` module
+and other status-based modules always show success.
+
+- Put `eval "$(starship init bash)"` at the end of `~/.bashrc`, after other tools that modify `PROMPT_COMMAND`.
+  Starship then runs any previously defined `PROMPT_COMMAND` after it has captured the status.
+- Make sure custom prompt hooks that must run first preserve the status:
+
+```bash
+my_hook() {
+    local exit_status=$?
+    # ... your commands ...
+    return $exit_status
+}
+```
+
 ## Custom pre-prompt and pre-execution Commands in PowerShell
 
 PowerShell does not have a formal preexec/precmd framework like most other shells.
