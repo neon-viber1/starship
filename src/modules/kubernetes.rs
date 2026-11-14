@@ -1358,6 +1358,50 @@ users: []
     }
 
     #[test]
+    fn test_dotted_context_pattern_with_escaped_parens() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let filename = dir.path().join("config");
+        let mut file = File::create(&filename)?;
+        file.write_all(
+            b"
+apiVersion: v1
+clusters: []
+contexts:
+  - context:
+      namespace: test_namespace
+    name: dev.local.cluster.k8s
+current-context: dev.local.cluster.k8s
+kind: Config
+preferences: {}
+users: []
+",
+        )?;
+        file.sync_all()?;
+
+        let actual = ModuleRenderer::new("kubernetes")
+            .path(dir.path())
+            .env("KUBECONFIG", filename.to_string_lossy().as_ref())
+            .config(toml::toml! {
+                [kubernetes]
+                format = "on [⛵ ($user on )($cluster in )$context \\($namespace\\)](dimmed green) "
+                disabled = false
+                contexts = [
+                  { context_pattern = "dev.local.cluster.k8s", style = "green", symbol = "💔 " },
+                ]
+            })
+            .collect();
+
+        let expected = Some(format!(
+            "on {} ",
+            nu_ansi_term::Color::Green
+                .dimmed()
+                .paint("⛵ dev.local.cluster.k8s (test_namespace)")
+        ));
+        assert_eq!(expected, actual);
+        dir.close()
+    }
+
+    #[test]
     fn test_config_context_uses_aliases() -> std::io::Result<()> {
         let dir = tempfile::tempdir()?;
         let filename = dir.path().join("config");

@@ -2964,6 +2964,10 @@ If the `$KUBECONFIG` env var is set the module will use that if not it will use 
 > This module is disabled by default.
 > To enable it, set `disabled` to `false` in your configuration file.
 >
+> If you use a custom top-level `format`, it must also include `$kubernetes`
+> (for example `format = '$directory$kubernetes$character'`), otherwise the module will never be shown.
+> The default `format` already includes it.
+>
 > When the module is enabled it will always be active, unless any of
 > `detect_env_vars`, `detect_extensions`, `detect_files` or `detect_folders` have
 > been set in which case the module will only be active in directories that match
