@@ -19,7 +19,22 @@ impl TextSegment {
     // Returns the AnsiString of the segment value
     fn ansi_string(&self, prev: Option<&AnsiStyle>) -> AnsiString<'_> {
         match self.style {
-            Some(style) => style.to_ansi_style(prev).paint(&self.value),
+            Some(style) => {
+                let ansi_style = style.to_ansi_style(prev);
+                if self.value.contains("\x1b[0m") || self.value.contains("\x1b[m") {
+                    // The text embeds its own full reset (e.g. colored command output), which
+                    // would also drop this segment's style for the rest of the segment and for
+                    // following segments sharing the same style. Re-apply the style after it.
+                    let prefix = ansi_style.prefix().to_string();
+                    let value = self
+                        .value
+                        .replace("\x1b[0m", &format!("\x1b[0m{prefix}"))
+                        .replace("\x1b[m", &format!("\x1b[m{prefix}"));
+                    ansi_style.paint(value)
+                } else {
+                    ansi_style.paint(&self.value)
+                }
+            }
             None => AnsiString::from(&self.value),
         }
     }
