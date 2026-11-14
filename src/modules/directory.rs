@@ -84,6 +84,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     };
 
     // Truncate the dir string to the maximum number of path components
+    let substituted_dir_string = dir_string.clone();
     let dir_string =
         if let Some(truncated) = truncate(&dir_string, config.truncation_length as usize) {
             is_truncated = true;
@@ -93,15 +94,15 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
         };
 
     let prefix = if is_truncated {
-        // Substitutions could have changed the prefix, so don't allow them and
-        // fish-style path contraction together
-        if config.fish_style_pwd_dir_length > 0 && config.substitutions_empty() {
-            // If user is using fish style path, we need to add the segment first
-            let contracted_home_dir = contract_path(display_dir, &home_dir, config.home_symbol);
-            to_fish_style(
+        if config.fish_style_pwd_dir_length > 0 {
+            // If user is using fish style path, we need to add the segment first.
+            // The substituted path is shortened, but the text inserted by
+            // substitutions is left intact.
+            to_fish_style_keeping(
                 config.fish_style_pwd_dir_length as usize,
-                &contracted_home_dir,
+                &substituted_dir_string,
                 &dir_string,
+                &replacement_components(&config.substitutions),
             )
         } else {
             String::from(config.truncation_symbol)
@@ -351,7 +352,35 @@ fn substitute_path(
 /// Absolute Path: `/some/Path/not/in_a/repo/but_nested`
 /// Contracted Path: `in_a/repo/but_nested`
 /// With Fish Style: `/s/P/n/in_a/repo/but_nested`
+#[cfg(test)]
 fn to_fish_style(pwd_dir_length: usize, dir_string: &str, truncated_dir_string: &str) -> String {
+    to_fish_style_keeping(pwd_dir_length, dir_string, truncated_dir_string, &[])
+}
+
+/// Path components of the text inserted by substitutions, which must not be shortened.
+fn replacement_components<'a>(
+    substitutions: &'a Either<Vec<SubstitutionConfig<'a>>, IndexMap<String, &'a str>>,
+) -> Vec<&'a str> {
+    let replacements: Vec<&str> = match substitutions {
+        Either::First(vec) => vec.iter().map(|s| s.to).collect(),
+        Either::Second(table) => table.values().copied().collect(),
+    };
+    replacements
+        .into_iter()
+        .flat_map(|to| to.split('/'))
+        .filter(|c| !c.is_empty())
+        .collect()
+}
+
+/// Like `to_fish_style`, but components listed in `keep` are left untouched and
+/// empty components in the middle of the path (left over by empty
+/// substitutions) are dropped.
+fn to_fish_style_keeping(
+    pwd_dir_length: usize,
+    dir_string: &str,
+    truncated_dir_string: &str,
+    keep: &[&str],
+) -> String {
     let replaced_dir_string = dir_string.trim_end_matches(truncated_dir_string);
     let components = replaced_dir_string.split('/').collect::<Vec<&str>>();
 
@@ -359,12 +388,16 @@ fn to_fish_style(pwd_dir_length: usize, dir_string: &str, truncated_dir_string: 
         return replaced_dir_string.to_string();
     }
 
+    let last = components.len() - 1;
     components
         .into_iter()
-        .map(|word| -> String {
+        .enumerate()
+        .filter(|&(i, word)| !(word.is_empty() && i != 0 && i != last))
+        .map(|(_, word)| -> String {
             let chars = UnicodeSegmentation::graphemes(word, true).collect::<Vec<&str>>();
             match word {
                 "" => String::new(),
+                _ if keep.contains(&word) => word.to_string(),
                 _ if chars.len() <= pwd_dir_length => word.to_string(),
                 _ if word.starts_with('.') => chars[..=pwd_dir_length].join(""),
                 _ => chars[..pwd_dir_length].join(""),
@@ -755,7 +788,7 @@ mod tests {
             .config(toml::toml! {
                 [directory]
                 truncation_length = 0
-                fish_style_pwd_dir_length = 2 // Overridden by substitutions
+                fish_style_pwd_dir_length = 2
                 [directory.substitutions]
                 "regular" = strange_sub
             })
@@ -768,6 +801,115 @@ mod tests {
         ));
 
         assert_eq!(expected, actual);
+    }
+
+    fn fish_sub_test(path: &str, config: toml::Table) -> Option<String> {
+        ModuleRenderer::new("directory")
+            .path(path)
+            .config(config)
+            .collect()
+    }
+
+    fn plain(expected: &str) -> Option<String> {
+        Some(format!(
+            "{} ",
+            Color::Cyan.bold().paint(convert_path_sep(expected))
+        ))
+    }
+
+    #[test]
+    fn fish_style_with_empty_substitution() {
+        let actual = fish_sub_test(
+            "/Idea/Hello/app/src/main/java/io/github/pinguinlars/h/c/u/theme",
+            toml::toml! {
+                [directory]
+                truncation_length = 1
+                fish_style_pwd_dir_length = 1
+                [directory.substitutions]
+                "io/github/pinguinlars" = ""
+            },
+        );
+        assert_eq!(plain("/I/H/a/s/m/j/h/c/u/theme"), actual);
+    }
+
+    #[test]
+    fn fish_style_with_prefix_substitution() {
+        let actual = fish_sub_test(
+            "/tmp/example/foo/bar/baz",
+            toml::toml! {
+                [directory]
+                truncation_length = 1
+                fish_style_pwd_dir_length = 1
+                [directory.substitutions]
+                "/tmp/example" = "[Example]"
+            },
+        );
+        assert_eq!(plain("[Example]/f/b/baz"), actual);
+    }
+
+    #[test]
+    fn fish_style_with_middle_substitution() {
+        let actual = fish_sub_test(
+            "/alpha/beta/gamma/delta/epsilon",
+            toml::toml! {
+                [directory]
+                truncation_length = 1
+                fish_style_pwd_dir_length = 1
+                [directory.substitutions]
+                "beta/gamma" = "Big"
+            },
+        );
+        assert_eq!(plain("/a/Big/d/epsilon"), actual);
+    }
+
+    #[test]
+    fn fish_style_with_last_component_substitution() {
+        let actual = fish_sub_test(
+            "/alpha/beta/gamma",
+            toml::toml! {
+                [directory]
+                truncation_length = 1
+                fish_style_pwd_dir_length = 1
+                [directory.substitutions]
+                "gamma" = "Renamed"
+            },
+        );
+        assert_eq!(plain("/a/b/Renamed"), actual);
+    }
+
+    #[test]
+    fn fish_style_without_substitutions_baseline() {
+        let actual = fish_sub_test(
+            "/alpha/beta/gamma",
+            toml::toml! {
+                [directory]
+                truncation_length = 1
+                fish_style_pwd_dir_length = 1
+            },
+        );
+        assert_eq!(plain("/a/b/gamma"), actual);
+    }
+
+    #[test]
+    fn fish_style_with_substitution_and_os_path_sep_disabled() {
+        let actual = fish_sub_test(
+            "/tmp/example/foo/bar/baz",
+            toml::toml! {
+                [directory]
+                truncation_length = 1
+                fish_style_pwd_dir_length = 1
+                use_os_path_sep = false
+                [directory.substitutions]
+                "/tmp/example" = "[Example]"
+            },
+        );
+        assert_eq!(
+            Some(format!(
+                "{} ",
+                Color::Cyan.bold().paint("[Example]/f/b/baz")
+            )),
+            actual
+        );
     }
 
     #[test]
