@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::context::Context;
@@ -228,6 +229,16 @@ pub fn create_command<T: AsRef<OsStr>>(binary_name: T) -> Result<Command> {
         }
     };
 
+    if is_git_placeholder(binary_name, &full_path, developer_tools_available) {
+        log::debug!(
+            "Skipping {full_path:?}: it is a placeholder without developer tools installed"
+        );
+        return Err(Error::new(
+            ErrorKind::NotFound,
+            "git is a placeholder; no developer tools are installed",
+        ));
+    }
+
     #[allow(clippy::disallowed_methods)]
     let mut cmd = Command::new(full_path);
     cmd.stderr(Stdio::piped())
@@ -235,6 +246,51 @@ pub fn create_command<T: AsRef<OsStr>>(binary_name: T) -> Result<Command> {
         .stdin(Stdio::null());
 
     Ok(cmd)
+}
+
+/// Detects the macOS `/usr/bin/git` shim, which pops up an install dialog for the
+/// Command Line Tools when run without them. `developer_tools` is only evaluated
+/// when the resolved path is the shim, so other gits cost nothing.
+fn is_git_placeholder(
+    binary_name: &OsStr,
+    full_path: &Path,
+    developer_tools: impl FnOnce() -> bool,
+) -> bool {
+    is_git_placeholder_on(
+        cfg!(target_os = "macos"),
+        binary_name,
+        full_path,
+        developer_tools,
+    )
+}
+
+fn is_git_placeholder_on(
+    is_macos: bool,
+    binary_name: &OsStr,
+    full_path: &Path,
+    developer_tools: impl FnOnce() -> bool,
+) -> bool {
+    is_macos && binary_name == "git" && full_path == Path::new("/usr/bin/git") && !developer_tools()
+}
+
+/// Checks (once per process) whether a developer directory exists, without running git.
+fn developer_tools_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        if std::env::var_os("DEVELOPER_DIR").is_some_and(|d| Path::new(&d).is_dir()) {
+            return true;
+        }
+        #[allow(clippy::disallowed_methods)]
+        Command::new("/usr/bin/xcode-select")
+            .arg("-p")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            // If the probe can't run, don't block git.
+            .unwrap_or(true)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -938,6 +994,31 @@ impl PathExt for Path {
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+
+    #[test]
+    fn git_placeholder_detection() {
+        let git = OsStr::new("git");
+        let shim = Path::new("/usr/bin/git");
+        // shim without developer tools
+        assert!(is_git_placeholder_on(true, git, shim, || false));
+        // shim with developer tools
+        assert!(!is_git_placeholder_on(true, git, shim, || true));
+        // other git: probe must not run
+        assert!(!is_git_placeholder_on(
+            true,
+            git,
+            Path::new("/opt/homebrew/bin/git"),
+            || { panic!("probe should not run") }
+        ));
+        // other binary at the same path
+        assert!(!is_git_placeholder_on(true, OsStr::new("hg"), shim, || {
+            panic!("probe should not run")
+        }));
+        // not macOS
+        assert!(!is_git_placeholder_on(false, git, shim, || {
+            panic!("probe should not run")
+        }));
+    }
 
     use super::*;
 
