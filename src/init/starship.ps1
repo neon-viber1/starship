@@ -70,6 +70,15 @@ $null = New-Module starship {
         $stdout.Result;
     }
 
+    # Number of newlines to prepend to the transient prompt so that it is as tall as the live prompt.
+    # Only multiline buffers need padding; single-line input stays compact.
+    function Get-TransientPromptPadding {
+        param([string]$Buffer, [string]$TransientPrompt, [int]$LivePromptExtraLines)
+        if (-not $Buffer -or -not $Buffer.Contains("`n")) { return 0 }
+        $transientExtraLines = $TransientPrompt.Split("`n").Length - 1
+        [math]::Max(0, $LivePromptExtraLines - $transientExtraLines)
+    }
+
     function Enable-TransientPrompt {
         Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
             $previousOutputEncoding = [Console]::OutputEncoding
@@ -148,13 +157,24 @@ $null = New-Module starship {
         # Invoke Starship
         $promptText = if ($script:TransientPrompt) {
             $script:TransientPrompt = $false
-            if (Test-Path function:Invoke-Starship-TransientFunction) {
+            $transientText = if (Test-Path function:Invoke-Starship-TransientFunction) {
                 Invoke-Starship-TransientFunction
             } else {
                 "$([char]0x1B)[1;32m❯$([char]0x1B)[0m "
             }
+            # PSReadLine moves a multiline input region up by the height difference between the live and
+            # transient prompts, leaving stale rows behind. Pad the transient prompt to the live height.
+            $padding = 0
+            try {
+                $bufferLine = $null
+                [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$bufferLine, [ref]$null)
+                $padding = Get-TransientPromptPadding -Buffer $bufferLine -TransientPrompt "$transientText" -LivePromptExtraLines $script:LivePromptExtraLines
+            } catch { $padding = 0 }
+            if ($padding -gt 0) { ("`n" * $padding) + $transientText } else { $transientText }
         } else {
-            Invoke-Native -Executable ::STARSHIP:: -Arguments $arguments
+            $livePrompt = Invoke-Native -Executable ::STARSHIP:: -Arguments $arguments
+            $script:LivePromptExtraLines = "$livePrompt".Split("`n").Length - 1
+            $livePrompt
         }
 
         # Set the number of extra lines in the prompt for PSReadLine prompt redraw.
@@ -191,6 +211,7 @@ $null = New-Module starship {
     $ENV:VIRTUAL_ENV_DISABLE_PROMPT=1
 
     $script:TransientPrompt = $false
+    $script:LivePromptExtraLines = 0
     $script:DoesUseLists = (Get-PSReadLineOption).PredictionViewStyle -eq 'ListView'
 
     if ($PSVersionTable.PSVersion.Major -gt 5) {

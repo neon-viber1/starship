@@ -29,6 +29,11 @@ Invoke-Expression (&starship init powershell)
 Enable-TransientPrompt
 ```
 
+When a multiline command is accepted and the transient prompt is shorter than the
+regular prompt, the transient prompt is padded with blank lines to the height of the
+regular prompt, so that no leftover continuation lines remain. Single-line commands
+are not padded.
+
 ## TransientPrompt and TransientRightPrompt in Cmd
 
 Clink allows you to replace the previous-printed prompt with custom strings. This
