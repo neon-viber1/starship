@@ -129,6 +129,26 @@ Unfortunately, getting font configuration correct is sometimes difficult. Users
 on the Discord may be able to help. If both symbols display correctly, but
 you still don't see them in starship, [file a bug report!](https://github.com/starship/starship/issues/new/choose)
 
+## Why is my cursor misplaced or my first line shifted when typing a long command?
+
+If symbols such as `❯` or `➤` make a long, wrapped command appear shifted or
+cause the first line to disappear while editing, the cause is usually not Starship.
+Starship only wraps zero-width escape sequences for the shell, never visible symbols,
+and the same problem occurs in zsh with a plain `PS1="❯ "`.
+It happens when the shell and the terminal disagree on the width of the character:
+
+- Your locale is not UTF-8. Check it with `locale charmap` and set a UTF-8 `LANG`/`LC_ALL`
+  (for example `en_US.UTF-8`), so that the shell counts multibyte characters correctly.
+- Your terminal treats ambiguous-width characters as double width. Check your terminal's
+  ambiguous-width setting (some terminals do this by default, others do not).
+
+As a last resort, use a symbol with a width of one, such as `>`:
+
+```toml
+[character]
+success_symbol = '[>](bold green)'
+```
+
 ## How do I uninstall Starship?
 
 Starship is just as easy to uninstall as it is to install in the first place.

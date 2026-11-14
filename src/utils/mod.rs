@@ -1105,6 +1105,17 @@ mod tests {
     }
 
     #[test]
+    fn test_color_sequence_wrappers_leave_visible_symbols_unwrapped() {
+        for symbol in ["❯", "➤", ">"] {
+            let styled = format!("\x1b[1;32m{symbol}\x1b[0m");
+            let zsh = wrap_colorseq_for_shell(styled.clone(), Shell::Zsh);
+            assert_eq!(zsh, format!("%{{\x1b[1;32m%}}{symbol}%{{\x1b[0m%}}"));
+            let bash = wrap_colorseq_for_shell(styled, Shell::Bash);
+            assert_eq!(bash, format!("\\[\x1b[1;32m\\]{symbol}\\[\x1b[0m\\]"));
+        }
+    }
+
+    #[test]
     fn test_color_sequence_wrappers() {
         let test0 = "\x1b2mhellomynamekeyes\x1b2m"; // BEGIN: \x1b     END: m
         let test1 = "\x1b]330;mlol\x1b]0m"; // BEGIN: \x1b     END: m
