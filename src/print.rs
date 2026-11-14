@@ -3,11 +3,15 @@ use nu_ansi_term::AnsiStrings;
 use rayon::prelude::*;
 use regex::Regex;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::fmt::{Debug, Write as FmtWrite};
 use std::io::{self, Write};
+use std::marker::PhantomData;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use terminal_size::terminal_size;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
@@ -70,11 +74,11 @@ fn test_grapheme_aware_width() {
 }
 
 pub fn prompt(args: Properties, target: Target) {
-    let context = Context::new(args, target);
+    let context = ContextGuard::new(Context::new(args, target));
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
-    write!(handle, "{}", get_prompt(&context)).unwrap();
+    write!(handle, "{}", get_prompt_guarded(&context)).unwrap();
 }
 
 pub fn prompt_with_claude_code(args: Properties, target: Target) {
@@ -84,13 +88,25 @@ pub fn prompt_with_claude_code(args: Properties, target: Target) {
 
     let mut context = Context::new(args, target).with_claude_code_data(claude_data);
     context.shell = Shell::Unknown;
+    let context = ContextGuard::new(context);
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
-    write!(handle, "{}", get_prompt(&context)).unwrap();
+    write!(handle, "{}", get_prompt_guarded(&context)).unwrap();
 }
 
+/// Renders the prompt without any per-module time limit.
 pub fn get_prompt(context: &Context) -> String {
+    get_prompt_impl(context, None)
+}
+
+/// Renders the prompt, skipping modules that exceed `module_timeout`.
+fn get_prompt_guarded(context: &ContextGuard) -> String {
+    let prefetch = Prefetch::new(context);
+    get_prompt_impl(context, Some(&prefetch))
+}
+
+fn get_prompt_impl(context: &Context, timed: Option<&Prefetch>) -> String {
     let config = &context.root_config;
     let mut buf = String::new();
 
@@ -110,6 +126,9 @@ pub fn get_prompt(context: &Context) -> String {
     }
 
     let (formatter, modules) = load_formatter_and_modules(context);
+    if let Some(prefetch) = timed {
+        prefetch.start_all(context, &modules);
+    }
 
     let formatter = formatter.map_variables_to_segments(|module| {
         // Make $all display all modules not explicitly referenced
@@ -117,7 +136,7 @@ pub fn get_prompt(context: &Context) -> String {
             Some(Ok(all_modules_uniq(&modules)
                 .par_iter()
                 .flat_map(|module| {
-                    handle_module(module, context, &modules)
+                    handle_module(module, context, &modules, timed)
                         .into_iter()
                         .flat_map(|module| module.segments)
                         .collect::<Vec<Segment>>()
@@ -127,7 +146,7 @@ pub fn get_prompt(context: &Context) -> String {
             None
         } else {
             // Get segments from module
-            Some(Ok(handle_module(module, context, &modules)
+            Some(Ok(handle_module(module, context, &modules, timed)
                 .into_iter()
                 .flat_map(|module| module.segments)
                 .collect::<Vec<Segment>>()))
@@ -169,17 +188,24 @@ pub fn get_prompt(context: &Context) -> String {
 }
 
 pub fn module(module_name: &str, args: Properties) {
-    let context = Context::new(args, Target::Main);
-    let module = get_module(module_name, &context).unwrap_or_default();
+    let context = ContextGuard::new(Context::new(args, Target::Main));
+    let module = get_module_guarded(module_name, &context).unwrap_or_default();
     print!("{module}");
 }
 
+/// Renders a single module without any time limit.
 pub fn get_module(module_name: &str, context: &Context) -> Option<String> {
-    modules::handle(module_name, context).map(|m| m.to_string())
+    handle_with_timeout(module_name, context, None).map(|m| m.to_string())
+}
+
+fn get_module_guarded(module_name: &str, context: &ContextGuard) -> Option<String> {
+    let prefetch = Prefetch::new(context);
+    handle_with_timeout(module_name, context, Some(&prefetch)).map(|m| m.to_string())
 }
 
 pub fn timings(args: Properties) {
-    let context = Context::new(args, Target::Main);
+    let context = ContextGuard::new(Context::new(args, Target::Main));
+    let prefetch = Prefetch::new(&context);
 
     struct ModuleTiming {
         name: String,
@@ -189,7 +215,7 @@ pub fn timings(args: Properties) {
         duration_len: usize,
     }
 
-    let mut modules = compute_modules(&context)
+    let mut modules = compute_modules(&context, Some(&prefetch))
         .iter()
         .filter(|module| !module.is_empty() || module.duration.as_millis() > 0)
         .map(|module| ModuleTiming {
@@ -225,7 +251,8 @@ pub fn timings(args: Properties) {
 }
 
 pub fn explain(args: Properties) {
-    let context = Context::new(args, Target::Main);
+    let context = ContextGuard::new(Context::new(args, Target::Main));
+    let prefetch = Prefetch::new(&context);
 
     struct ModuleInfo {
         value: String,
@@ -236,7 +263,7 @@ pub fn explain(args: Properties) {
 
     static DONT_PRINT: &[&str] = &["line_break"];
 
-    let modules = compute_modules(&context)
+    let modules = compute_modules(&context, Some(&prefetch))
         .into_iter()
         .filter(|module| !DONT_PRINT.contains(&module.get_name().as_str()))
         // this contains empty modules which should not print
@@ -319,20 +346,23 @@ pub fn explain(args: Properties) {
     }
 }
 
-fn compute_modules<'a>(context: &'a Context) -> Vec<Module<'a>> {
+fn compute_modules<'a>(context: &'a Context, timed: Option<&Prefetch>) -> Vec<Module<'a>> {
     let mut prompt_order: Vec<Module<'a>> = Vec::new();
 
     let (_formatter, modules) = load_formatter_and_modules(context);
+    if let Some(prefetch) = timed {
+        prefetch.start_all(context, &modules);
+    }
 
     for module in &modules {
         // Manually add all modules if `$all` is encountered
         if module == "all" {
             for module in all_modules_uniq(&modules) {
-                let modules = handle_module(&module, context, &modules);
+                let modules = handle_module(&module, context, &modules, timed);
                 prompt_order.extend(modules);
             }
         } else {
-            let modules = handle_module(module, context, &modules);
+            let modules = handle_module(module, context, &modules, timed);
             prompt_order.extend(modules);
         }
     }
@@ -344,21 +374,22 @@ fn handle_module<'a>(
     module: &str,
     context: &'a Context,
     module_list: &BTreeSet<String>,
+    timed: Option<&Prefetch>,
 ) -> Vec<Module<'a>> {
     let mut modules: Vec<Module> = Vec::new();
 
     if ALL_MODULES.contains(&module) {
         // Write out a module if it isn't disabled
         if !context.is_module_disabled_in_config(module) {
-            modules.extend(modules::handle(module, context));
+            modules.extend(handle_with_timeout(module, context, timed));
         }
     } else if module.starts_with("custom.") || module.starts_with("env_var.") {
         // custom.<name> and env_var.<name> are special cases and handle disabled modules themselves
-        modules.extend(modules::handle(module, context));
+        modules.extend(handle_with_timeout(module, context, timed));
     } else if matches!(module, "custom" | "env_var") {
         // env var is a spacial case and may contain a top-level module definition
         if module == "env_var" {
-            modules.extend(modules::handle(module, context));
+            modules.extend(handle_with_timeout(module, context, timed));
         }
 
         // Write out all custom modules, except for those that are explicitly set
@@ -376,7 +407,11 @@ fn handle_module<'a>(
                     if module == "env_var" && !config.is_table() {
                         None
                     } else if should_add_implicit_module(module, child, config, module_list) {
-                        Some(modules::handle(&format!("{module}.{child}"), context))
+                        Some(handle_with_timeout(
+                            &format!("{module}.{child}"),
+                            context,
+                            timed,
+                        ))
                     } else {
                         None
                     }
@@ -877,5 +912,300 @@ mod test {
         let expected = "user profile";
         let actual = get_prompt(&context);
         assert_eq!(expected, actual);
+    }
+}
+
+/// Set once any module worker has been abandoned after exceeding `module_timeout`.
+static TIMED_OUT: AtomicBool = AtomicBool::new(false);
+
+/// Owns a `Context` and keeps it alive forever (leaks it) if a module worker was abandoned,
+/// because that worker may still hold a reference to the context.
+struct ContextGuard<'a>(std::mem::ManuallyDrop<Context<'a>>);
+
+impl<'a> ContextGuard<'a> {
+    fn new(context: Context<'a>) -> Self {
+        Self(std::mem::ManuallyDrop::new(context))
+    }
+}
+
+impl<'a> std::ops::Deref for ContextGuard<'a> {
+    type Target = Context<'a>;
+    fn deref(&self) -> &Context<'a> {
+        &self.0
+    }
+}
+
+impl<'a> std::ops::DerefMut for ContextGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Context<'a> {
+        &mut self.0
+    }
+}
+
+impl Drop for ContextGuard<'_> {
+    fn drop(&mut self) {
+        if !TIMED_OUT.load(Ordering::SeqCst) {
+            // SAFETY: no worker was abandoned, so nothing else references the context, and
+            // it is dropped exactly once here.
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.0) };
+        }
+    }
+}
+
+/// A module computation running on its own dedicated thread.
+struct Pending {
+    // A one-thread rayon pool, so any parallel iterators the module uses run on that thread
+    // and never depend on the (possibly all waiting) global pool.
+    pool: rayon::ThreadPool,
+    rx: std::sync::mpsc::Receiver<Option<Module<'static>>>,
+    deadline: Instant,
+}
+
+/// Starts module computations eagerly, each on its own thread, and lets callers wait for them
+/// with a deadline measured from when the computation started. Because every module runs
+/// concurrently and has its own thread, hung modules neither delay nor starve healthy ones,
+/// and the time spent waiting in the pool or queue never counts against a module.
+///
+/// A `Prefetch` can only be built from a `ContextGuard`, which is what makes lending the
+/// context to detached threads sound (see `ContextGuard`).
+struct Prefetch<'g> {
+    ctx_addr: usize,
+    timeout: Duration,
+    pending: Mutex<HashMap<String, Pending>>,
+    _guard: PhantomData<&'g ()>,
+}
+
+impl<'g> Prefetch<'g> {
+    fn new(context: &'g ContextGuard) -> Self {
+        Self {
+            ctx_addr: std::ptr::from_ref::<Context>(context) as usize,
+            timeout: Duration::from_millis(context.root_config.module_timeout),
+            pending: Mutex::new(HashMap::new()),
+            _guard: PhantomData,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        !self.timeout.is_zero()
+    }
+
+    fn spawn(&self, module: &str) -> Option<Pending> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .thread_name(|_| "starship-module".to_owned())
+            .build()
+            .ok()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx_addr = self.ctx_addr;
+        let name = module.to_owned();
+        pool.spawn(move || {
+            // SAFETY: the address comes from a live `ContextGuard` (see `Prefetch::new`). If
+            // this worker is abandoned, `TIMED_OUT` is set before the guard is dropped (here
+            // or in `Drop for Prefetch`), and the guard then leaks the context, so it stays
+            // valid for as long as this worker may run.
+            let ctx: &'static Context = unsafe { &*(ctx_addr as *const Context) };
+            // The receiver may be gone if we gave up; ignore the error.
+            let _ = tx.send(modules::handle(&name, ctx));
+        });
+        Some(Pending {
+            pool,
+            rx,
+            deadline: Instant::now() + self.timeout,
+        })
+    }
+
+    fn pending_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Pending>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether `handle_module` would compute this module name.
+    fn wanted(context: &Context, module: &str) -> bool {
+        if ALL_MODULES.contains(&module) {
+            !context.is_module_disabled_in_config(module)
+        } else {
+            module.starts_with("custom.") || module.starts_with("env_var.")
+        }
+    }
+
+    /// Start every module of the prompt up front so they all run concurrently.
+    fn start_all(&self, context: &Context, modules: &BTreeSet<String>) {
+        if !self.enabled() || std::ptr::from_ref(context) as usize != self.ctx_addr {
+            return;
+        }
+        let mut names: Vec<String> = Vec::new();
+        for module in modules {
+            if module == "all" {
+                names.extend(all_modules_uniq(modules));
+            } else {
+                names.push(module.clone());
+            }
+        }
+        for name in names {
+            if !Self::wanted(context, &name) {
+                continue;
+            }
+            if let Some(pending) = self.spawn(&name) {
+                self.pending_lock().insert(name, pending);
+            }
+        }
+    }
+}
+
+impl Drop for Prefetch<'_> {
+    fn drop(&mut self) {
+        // Workers that were started but are still running reference the context.
+        let pending = std::mem::take(&mut *self.pending_lock());
+        for (_, p) in pending {
+            if matches!(p.rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+                TIMED_OUT.store(true, Ordering::SeqCst);
+                std::mem::forget(p.pool);
+            }
+        }
+    }
+}
+
+/// Like `modules::handle`, but gives up on modules that take longer than `module_timeout`
+/// (measured from when the module started running).
+///
+/// Without a `Prefetch` (callers holding a bare `Context`) the module runs on the current
+/// thread with no limit, so the `unsafe` code in `Prefetch` is unreachable for any caller that
+/// cannot uphold its invariant.
+fn handle_with_timeout<'a>(
+    module: &str,
+    context: &'a Context,
+    prefetch: Option<&Prefetch>,
+) -> Option<Module<'a>> {
+    let Some(prefetch) =
+        prefetch.filter(|p| p.enabled() && std::ptr::from_ref(context) as usize == p.ctx_addr)
+    else {
+        return modules::handle(module, context);
+    };
+    let taken = prefetch.pending_lock().remove(module);
+    let Some(pending) = taken.or_else(|| prefetch.spawn(module)) else {
+        return modules::handle(module, context);
+    };
+    let remaining = pending.deadline.saturating_duration_since(Instant::now());
+    match pending.rx.recv_timeout(remaining) {
+        // SAFETY: shortens the lifetime back to the caller's borrow of the context.
+        Ok(m) => unsafe { std::mem::transmute::<Option<Module<'static>>, Option<Module<'a>>>(m) },
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            TIMED_OUT.store(true, Ordering::SeqCst);
+            // The worker is still running; never tear its pool down underneath it.
+            std::mem::forget(pending.pool);
+            log::warn!(
+                "Module '{module}' did not finish within module_timeout ({}ms) and was skipped. \
+                 You can set module_timeout in your config to a higher value (or 0 to disable it).",
+                context.root_config.module_timeout
+            );
+            None
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    fn slow_config(timeout: u64) -> toml::Table {
+        toml::toml! {
+            command_timeout = 100000
+            format = "${custom.slow}${custom.fast}"
+            [custom.slow]
+            command = "sleep 3; echo slow"
+            format = "$output"
+            shell = ["sh"]
+            when = true
+            [custom.fast]
+            command = "echo fast"
+            format = "$output"
+            shell = ["sh"]
+            when = true
+        }
+        .into_iter()
+        .chain([(
+            "module_timeout".to_owned(),
+            toml::Value::Integer(timeout as i64),
+        )])
+        .collect()
+    }
+
+    fn context_with(config: toml::Table, dir: &std::path::Path) -> ContextGuard<'static> {
+        ContextGuard::new(Context::from(
+            crate::test::ModuleRenderer::new("custom.fast")
+                .path(dir)
+                .config(config),
+        ))
+    }
+
+    #[test]
+    fn module_timeout_config_default_and_user_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(toml::Table::new(), dir.path());
+        assert_eq!(ctx.root_config.module_timeout, 5000);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(slow_config(123), dir.path());
+        assert_eq!(ctx.root_config.module_timeout, 123);
+    }
+
+    #[test]
+    fn fast_module_is_unaffected_by_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(slow_config(5000), dir.path());
+        let out = get_module_guarded("custom.fast", &ctx).unwrap();
+        assert!(out.contains("fast"), "{out:?}");
+    }
+
+    #[test]
+    fn slow_module_is_dropped_and_rest_of_prompt_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(slow_config(100), dir.path());
+        let start = std::time::Instant::now();
+        assert_eq!(get_module_guarded("custom.slow", &ctx), None);
+        let prompt = get_prompt_guarded(&ctx);
+        assert!(start.elapsed() < Duration::from_millis(2500));
+        assert!(prompt.contains("fast"), "{prompt:?}");
+        assert!(!prompt.contains("slow"), "{prompt:?}");
+        // The abandoned worker still references the context: the guard must leak it.
+        assert!(TIMED_OUT.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn zero_module_timeout_disables_limit() {
+        let mut config = slow_config(0);
+        config.insert("command_timeout".into(), toml::Value::Integer(100000));
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(config, dir.path());
+        let out = get_module_guarded("custom.fast", &ctx).unwrap();
+        assert!(out.contains("fast"));
+    }
+
+    #[test]
+    fn many_hung_modules_do_not_starve_healthy_ones() {
+        let n = 24;
+        let mut text = String::from("command_timeout = 100000\nmodule_timeout = 300\nformat = \"");
+        for i in 0..n {
+            text.push_str(&format!("${{custom.s{i}}}"));
+        }
+        text.push_str("${custom.fast}\"\n");
+        for i in 0..n {
+            text.push_str(&format!(
+                "[custom.s{i}]\ncommand = \"sleep 3; echo slow\"\nformat = \"$output\"\nshell = [\"sh\"]\nwhen = true\n"
+            ));
+        }
+        text.push_str(
+            "[custom.fast]\ncommand = \"echo fast\"\nformat = \"$output\"\nshell = [\"sh\"]\nwhen = true\n",
+        );
+        let config: toml::Table = text.parse().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(config, dir.path());
+        let start = std::time::Instant::now();
+        let prompt = get_prompt_guarded(&ctx);
+        assert!(
+            start.elapsed() < Duration::from_millis(2500),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(prompt.contains("fast"), "{prompt:?}");
+        assert!(!prompt.contains("slow"), "{prompt:?}");
     }
 }
