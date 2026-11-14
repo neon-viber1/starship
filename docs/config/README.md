@@ -2090,7 +2090,7 @@ current directory.
 | `modified`             | `'!'`                                         | The format shown when there are file modifications in the working directory.                                |
 | `staged`               | `'+'`                                         | The format shown when a new file has been added to the staging area.                                        |
 | `renamed`              | `'»'`                                         | The format shown when a renamed file has been added to the staging area.                                    |
-| `deleted`              | `'✘'`                                         | The format shown when a file's deletion has been added to the staging area.                                 |
+| `deleted`              | `'✘'`                                         | The format shown when a file has been deleted, either in the working directory or in the staging area.      |
 | `typechanged`          | `""`                                          | The format shown when a file's type has been changed in the staging area.                                   |
 | `style`                | `'bold red'`                                  | The style for the module.                                                                                   |
 | `ignore_submodules`    | `false`                                       | Ignore changes to submodules.                                                                               |
@@ -2120,7 +2120,7 @@ The following variables can be used in `format`:
 | `modified`             | Displays `modified` when there are file modifications in the working directory.                               |
 | `staged`               | Displays `staged` when a new file has been added to the staging area.                                         |
 | `renamed`              | Displays `renamed` when a renamed file has been added to the staging area.                                    |
-| `deleted`              | Displays `deleted` when a file's deletion has been added to the staging area.                                 |
+| `deleted`              | Displays `deleted` when a file has been deleted, staged or not. Use `index_deleted` and `worktree_deleted` to tell them apart. |
 | `typechanged`          | Displays `typechanged` when a file's type has been changed in the staging area.                               |
 | `worktree_added`       | Displays `worktree_added` when a new file has been added in the working directory.                            |
 | `worktree_deleted`     | Displays `worktree_deleted` when a file's been deleted in the working directory.                              |

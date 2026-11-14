@@ -1860,6 +1860,69 @@ pub mod tests {
     }
 
     #[test]
+    fn distinguishes_staged_and_unstaged_deleted_files() -> io::Result<()> {
+        let config = |use_git_executable: bool| {
+            toml::toml! {
+                [git_status]
+                format = "$index_deleted|$worktree_deleted|$deleted"
+                index_deleted = "SD$count"
+                worktree_deleted = "WD$count"
+                deleted = "D$count"
+                use_git_executable = use_git_executable
+            }
+        };
+        for (&mode, use_git_executable) in COMMON_GIT_PROVIDERS
+            .iter()
+            .flat_map(|m| [(m, false), (m, true)])
+        {
+            // staged only
+            let repo_dir = fixture_repo(mode)?;
+            create_deleted_in_index(repo_dir.path())?;
+            let actual = ModuleRenderer::new("git_status")
+                .config(config(use_git_executable))
+                .path(repo_dir.path())
+                .collect();
+            assert_eq!(Some(String::from("SD1||D1")), actual);
+            repo_dir.close()?;
+
+            // unstaged only
+            let repo_dir = fixture_repo(mode)?;
+            create_deleted(repo_dir.path())?;
+            let actual = ModuleRenderer::new("git_status")
+                .config(config(use_git_executable))
+                .path(repo_dir.path())
+                .collect();
+            assert_eq!(Some(String::from("|WD1|D1")), actual);
+            repo_dir.close()?;
+
+            // both kinds present
+            let repo_dir = fixture_repo(mode)?;
+            fs::write(repo_dir.path().join("extra.txt"), "extra")?;
+            for args in [
+                vec!["add", "extra.txt"],
+                vec!["commit", "-m", "add extra", "--no-gpg-sign"],
+            ] {
+                create_command("git")?
+                    .args(args)
+                    .current_dir(repo_dir.path())
+                    .output()?;
+            }
+            create_command("git")?
+                .args(["rm", "extra.txt"])
+                .current_dir(repo_dir.path())
+                .output()?;
+            create_deleted(repo_dir.path())?;
+            let actual = ModuleRenderer::new("git_status")
+                .config(config(use_git_executable))
+                .path(repo_dir.path())
+                .collect();
+            assert_eq!(Some(String::from("SD1|WD1|D2")), actual);
+            repo_dir.close()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn doesnt_show_ignored_file() -> io::Result<()> {
         for &mode in COMMON_GIT_PROVIDERS {
             let repo_dir = fixture_repo(mode)?;
