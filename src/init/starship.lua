@@ -28,25 +28,30 @@ clink.onendedit(function (curr_line)
   end
 end)
 
+-- Remove a single trailing newline so the cursor stays right after the prompt
+local function strip_trailing_newline(s)
+  return (s:gsub("\r?\n$", ""))
+end
+
 function starship_prompt:filter(prompt)
   if starship_preprompt_user_func ~= nil then
     starship_preprompt_user_func(prompt)
   end
-  return io.popen([[::STARSHIP::]].." prompt"
+  return strip_trailing_newline(io.popen([[::STARSHIP::]].." prompt"
     .." --status="..os.geterrorlevel()
     .." --cmd-duration="..math.floor(curr_duration*1000)
     .." --terminal-width="..console.getwidth()
     .." --keymap="..rl.getvariable('keymap')
-  ):read("*a")
+  ):read("*a"))
 end
 
 function starship_prompt:rightfilter(prompt)
-  return io.popen([[::STARSHIP::]].." prompt --right"
+  return strip_trailing_newline(io.popen([[::STARSHIP::]].." prompt --right"
     .." --status="..os.geterrorlevel()
     .." --cmd-duration="..math.floor(curr_duration*1000)
     .." --terminal-width="..console.getwidth()
     .." --keymap="..rl.getvariable('keymap')
-  ):read("*a")
+  ):read("*a"))
 end
 
 if starship_transient_prompt_func ~= nil then
