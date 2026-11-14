@@ -282,6 +282,15 @@ const CMDEXE_INIT: &str = include_str!("starship.lua");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pwsh_init_pads_transient_prompt_for_multiline_input() {
+        assert!(PWSH_INIT.contains("function Get-TransientPromptPadding"));
+        assert!(PWSH_INIT.contains("-not $Buffer.Contains(\"`n\")) { return 0 }"));
+        assert!(PWSH_INIT.contains("$script:LivePromptExtraLines = "));
+        assert!(PWSH_INIT.contains("[math]::Max(0, $LivePromptExtraLines - $transientExtraLines)"));
+    }
+
     #[test]
     fn escape_pwsh() -> io::Result<()> {
         let starship_path = StarshipPath {
