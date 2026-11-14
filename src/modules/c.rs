@@ -14,6 +14,43 @@ mod tests {
     use std::io;
 
     #[test]
+    fn commands_are_not_run_through_a_shell() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        File::create(dir.path().join("any.c"))?.sync_all()?;
+        let output = || {
+            Some(CommandOutput {
+                stdout: String::from("gcc (GCC) 13.0.0\n"),
+                stderr: String::default(),
+            })
+        };
+
+        // A pipeline in a single entry is treated as a program name and fails to run.
+        let piped = ModuleRenderer::new("c")
+            .config(toml::toml! {
+                [c]
+                commands = [["gcc --version | head -n 1"]]
+            })
+            .path(dir.path())
+            .collect();
+        assert_eq!(
+            Some(format!("via {}", Color::Fixed(149).bold().paint("C "))),
+            piped
+        );
+
+        // Wrapping the pipeline in a shell with the script as one argument works.
+        let wrapped = ModuleRenderer::new("c")
+            .config(toml::toml! {
+                [c]
+                commands = [["sh", "-c", "gcc --version | head -n 1"]]
+            })
+            .cmd("sh -c gcc --version | head -n 1", output())
+            .path(dir.path())
+            .collect();
+        assert!(wrapped.unwrap().contains("13.0.0"));
+        dir.close()
+    }
+
+    #[test]
     fn folder_without_c_files() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
 
