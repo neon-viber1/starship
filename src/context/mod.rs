@@ -565,6 +565,10 @@ fn get_config_path_os(env: &Env) -> Option<OsString> {
     Some(home_dir(env)?.join(".config").join("starship.toml").into())
 }
 
+fn lower_path(p: &Path) -> PathBuf {
+    PathBuf::from(p.to_string_lossy().to_lowercase())
+}
+
 #[derive(Debug)]
 pub struct DirContents {
     // HashSet of all files, no folders, relative to the base directory given at construction.
@@ -575,6 +579,37 @@ pub struct DirContents {
     folders: HashSet<PathBuf>,
     // HashSet of all extensions found, without dots, e.g. "js" instead of ".js".
     extensions: HashSet<String>,
+    // Lower-cased copies of the sets above, used when the filesystem is case-insensitive.
+    files_lower: HashSet<PathBuf>,
+    file_names_lower: HashSet<String>,
+    folders_lower: HashSet<PathBuf>,
+    extensions_lower: HashSet<String>,
+    // Whether the scanned directory lives on a case-insensitive filesystem.
+    case_insensitive: bool,
+}
+
+/// Probe whether the directory is on a case-insensitive filesystem by looking up
+/// one existing entry with its letter case flipped.
+fn detect_case_insensitive(base: &Path, names: &HashSet<String>) -> bool {
+    let Some(name) = names.iter().find(|n| n.chars().any(char::is_alphabetic)) else {
+        return false;
+    };
+    let flipped: String = name
+        .chars()
+        .map(|c| {
+            if c.is_lowercase() {
+                c.to_uppercase().collect::<String>()
+            } else if c.is_uppercase() {
+                c.to_lowercase().collect::<String>()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    if &flipped == name {
+        return false;
+    }
+    fs::symlink_metadata(base.join(flipped)).is_ok()
 }
 
 impl DirContents {
@@ -690,12 +725,31 @@ impl DirContents {
             start.elapsed()
         );
 
+        let mut all_names = file_names.clone();
+        all_names.extend(
+            folders
+                .iter()
+                .filter_map(|f| f.file_name().map(|n| n.to_string_lossy().to_string())),
+        );
+        let case_insensitive = detect_case_insensitive(base_path, &all_names);
+
         Ok(Self {
+            files_lower: files.iter().map(|p| lower_path(p)).collect(),
+            file_names_lower: file_names.iter().map(|s| s.to_lowercase()).collect(),
+            folders_lower: folders.iter().map(|p| lower_path(p)).collect(),
+            extensions_lower: extensions.iter().map(|s| s.to_lowercase()).collect(),
+            case_insensitive,
             files,
             file_names,
             folders,
             extensions,
         })
+    }
+
+    #[cfg(test)]
+    fn with_case_insensitive(mut self, case_insensitive: bool) -> Self {
+        self.case_insensitive = case_insensitive;
+        self
     }
 
     pub fn files(&self) -> impl Iterator<Item = &PathBuf> {
@@ -704,18 +758,22 @@ impl DirContents {
 
     pub fn has_file(&self, path: &str) -> bool {
         self.files.contains(Path::new(path))
+            || (self.case_insensitive && self.files_lower.contains(&lower_path(Path::new(path))))
     }
 
     pub fn has_file_name(&self, name: &str) -> bool {
         self.file_names.contains(name)
+            || (self.case_insensitive && self.file_names_lower.contains(&name.to_lowercase()))
     }
 
     pub fn has_folder(&self, path: &str) -> bool {
         self.folders.contains(Path::new(path))
+            || (self.case_insensitive && self.folders_lower.contains(&lower_path(Path::new(path))))
     }
 
     pub fn has_extension(&self, ext: &str) -> bool {
         self.extensions.contains(ext)
+            || (self.case_insensitive && self.extensions_lower.contains(&ext.to_lowercase()))
     }
 
     pub fn has_any_positive_file_name(&self, names: &[&str]) -> bool {
@@ -1151,6 +1209,67 @@ mod tests {
             fs::File::create(p)?.sync_all()?;
         }
         Ok(dir)
+    }
+
+    #[test]
+    fn test_case_insensitive_matching() -> io::Result<()> {
+        let d = testdir(&["cargo.toml", "MAIN.RS"])?;
+        fs::create_dir(d.path().join("NodeModules"))?;
+        let files = ["Cargo.toml"];
+        let exts = ["rs"];
+        let folders = ["nodemodules"];
+        for (ci, expected) in [(true, true), (false, false)] {
+            let dc = DirContents::from_path(d.path(), false)?.with_case_insensitive(ci);
+            assert_eq!(
+                ScanDir {
+                    dir_contents: &dc,
+                    files: &files,
+                    extensions: &[],
+                    folders: &[]
+                }
+                .is_match(),
+                expected
+            );
+            assert_eq!(
+                ScanDir {
+                    dir_contents: &dc,
+                    files: &[],
+                    extensions: &exts,
+                    folders: &[]
+                }
+                .is_match(),
+                expected
+            );
+            assert_eq!(
+                ScanDir {
+                    dir_contents: &dc,
+                    files: &[],
+                    extensions: &[],
+                    folders: &folders
+                }
+                .is_match(),
+                expected
+            );
+            // negative matching follows the same rule
+            assert_eq!(
+                ScanDir {
+                    dir_contents: &dc,
+                    files: &[],
+                    extensions: &["!rs", "toml"],
+                    folders: &[]
+                }
+                .is_match(),
+                !expected
+            );
+        }
+        // exact-case still matches in both modes
+        for ci in [true, false] {
+            let dc = DirContents::from_path(d.path(), false)?.with_case_insensitive(ci);
+            assert!(dc.has_file_name("cargo.toml"));
+            assert!(dc.has_extension("RS"));
+            assert!(dc.has_folder("NodeModules"));
+        }
+        d.close()
     }
 
     #[test]
