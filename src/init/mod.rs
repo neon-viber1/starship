@@ -320,4 +320,85 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Runs an interactive bash session that sources the bash init script with a
+    /// stub `starship` binary, executes `setup`, then `false`, and returns the
+    /// PS1 produced on the following prompt.
+    /// Returns `None` when bash is not available.
+    #[cfg(unix)]
+    fn bash_prompt(setup: &str, setup_after_init: bool) -> io::Result<Option<String>> {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Stdio;
+
+        let Ok(bash) = which("bash") else {
+            return Ok(None);
+        };
+        let dir = tempfile::tempdir()?;
+        let stub = dir.path().join("starship");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\ncase \"$1\" in\n  time) echo 0 ;;\n  prompt)\n    for a in \"$@\"; do case \"$a\" in --status=*) printf 'STATUS=%s> ' \"${a#--status=}\" ;; esac; done ;;\nesac\n",
+        )?;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))?;
+        let init = dir.path().join("init.bash");
+        std::fs::write(
+            &init,
+            BASH_INIT.replace("::STARSHIP::", stub.to_str().unwrap()),
+        )?;
+
+        let (before, after) = if setup_after_init {
+            ("", setup)
+        } else {
+            (setup, "")
+        };
+        let script = format!(
+            "{before}\nsource '{}'\n{after}\nfalse\nprintf 'RESULT[%s]\\n' \"$PS1\"\n",
+            init.display()
+        );
+        let mut child = create_command(bash)?
+            .args(["--norc", "--noprofile", "-i"])
+            .env_clear()
+            .env("PATH", env::var_os("PATH").unwrap_or_default())
+            .env("HOME", dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(script.as_bytes())?;
+        let out = String::from_utf8_lossy(&child.wait_with_output()?.stdout).into_owned();
+        dir.close()?;
+        Ok(out
+            .lines()
+            .filter_map(|l| l.split("RESULT[").nth(1))
+            .next_back()
+            .and_then(|l| l.strip_suffix(']'))
+            .map(str::to_owned))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_precmd_preserves_status_with_existing_prompt_command() -> io::Result<()> {
+        // A user hook registered before init must not hide the failure
+        if let Some(ps1) = bash_prompt("hook() { :; }\nPROMPT_COMMAND=hook", false)? {
+            assert!(ps1.contains("STATUS=1>"), "unexpected PS1: {ps1}");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_precmd_status_depends_on_hook_order() -> io::Result<()> {
+        // Documents the requirement from the advanced config docs: hooks that
+        // run before starship_precmd must preserve `$?`.
+        let hook = "hook() { :; }\nPROMPT_COMMAND=\"hook;$PROMPT_COMMAND\"";
+        if let Some(ps1) = bash_prompt(hook, true)? {
+            assert!(ps1.contains("STATUS=0>"), "unexpected PS1: {ps1}");
+        }
+        let hook = "hook() { local s=$?; :; return $s; }\nPROMPT_COMMAND=\"hook;$PROMPT_COMMAND\"";
+        if let Some(ps1) = bash_prompt(hook, true)? {
+            assert!(ps1.contains("STATUS=1>"), "unexpected PS1: {ps1}");
+        }
+        Ok(())
+    }
 }
