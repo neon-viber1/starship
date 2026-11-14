@@ -26,6 +26,11 @@ pub struct Grapheme<'a>(pub &'a str);
 
 impl Grapheme<'_> {
     pub fn width(&self) -> usize {
+        // U+FE0F (variation selector-16) requests emoji presentation, which
+        // terminals render two cells wide even for text-default characters.
+        if self.0.contains('\u{FE0F}') {
+            return 2;
+        }
         self.0
             .chars()
             .filter_map(UnicodeWidthChar::width)
@@ -65,6 +70,10 @@ fn test_grapheme_aware_width() {
     assert_eq!(2, "👩‍👩‍👦‍👦".width_graphemes());
     assert_eq!(1, "Ü".width_graphemes());
     assert_eq!(11, "normal text".width_graphemes());
+    // Emoji presentation sequences are rendered two cells wide
+    assert_eq!(2, "↕\u{FE0F}".width_graphemes());
+    assert_eq!(4, "↕\u{FE0F}  ".width_graphemes());
+    assert_eq!(1, "↕".width_graphemes());
     // Magenta string test
     assert_eq!(11, "\x1B[35;6mnormal text".width_graphemes());
 }
@@ -655,6 +664,31 @@ mod test {
         let expected = String::from("0_0>>");
         let actual = get_prompt(&context);
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn fill_accounts_for_emoji_presentation_width() {
+        let mut context = default_context().set_config(toml::toml! {
+            add_newline = false
+            format = "$shlvl$fill$character"
+            [shlvl]
+            disabled = false
+            threshold = 1
+            symbol = "↕\u{FE0F}"
+            [fill]
+            symbol = "."
+            [character]
+            format = ">"
+        });
+        context.width = 10;
+        context.env.insert("SHLVL", "2".to_string());
+
+        let actual = get_prompt(&context);
+        // "↕\u{FE0F}" (2 cells) + "2 " (2 cells) + ">" (1 cell) leave 5 cells of fill
+        assert!(actual.contains("....."), "{actual:?}");
+        assert!(!actual.contains("......"), "{actual:?}");
+        assert!(!actual.contains('…'), "{actual:?}");
+        assert!(actual.contains("↕\u{FE0F}"), "{actual:?}");
     }
 
     #[test]
