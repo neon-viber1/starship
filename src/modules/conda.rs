@@ -9,9 +9,27 @@ use crate::formatter::StringFormatter;
 /// Will display the Conda environment iff `$CONDA_DEFAULT_ENV` is set.
 pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     // Reference implementation: https://github.com/denysdovhan/spaceship-prompt/blob/master/sections/conda.zsh
-    let conda_env = context.get_env("CONDA_DEFAULT_ENV").unwrap_or_default();
+    let conda_prefix = context
+        .get_env("CONDA_PREFIX")
+        .filter(|p| !p.trim().is_empty());
+    let mut conda_env = context.get_env("CONDA_DEFAULT_ENV").unwrap_or_default();
     if conda_env.trim().is_empty() {
-        return None;
+        // Fall back to the active prefix (e.g. micromamba's nameless root env)
+        conda_env = conda_prefix.clone()?;
+    }
+
+    // The root environment is the base environment, even when it is
+    // reported as a path (as micromamba does).
+    let is_root_prefix = |value: &str| {
+        let trim = |s: &str| s.trim_end_matches(['/', '\\']).to_string();
+        let value = trim(value);
+        ["MAMBA_ROOT_PREFIX", "CONDA_ROOT"]
+            .iter()
+            .filter_map(|var| context.get_env(var))
+            .any(|root| !root.trim().is_empty() && trim(&root) == value)
+    };
+    if conda_env != "base" && is_root_prefix(&conda_env) {
+        conda_env = "base".to_string();
     }
 
     let mut module = context.new_module("conda");
@@ -81,6 +99,39 @@ mod tests {
         let expected = None;
 
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn micromamba_root_hidden_by_default() {
+        let actual = ModuleRenderer::new("conda")
+            .env("CONDA_PREFIX", "/tmp/mm")
+            .env("MAMBA_ROOT_PREFIX", "/tmp/mm")
+            .collect();
+        assert_eq!(None, actual);
+    }
+
+    #[test]
+    fn micromamba_root_shown_as_base() {
+        let actual = ModuleRenderer::new("conda")
+            .env("CONDA_PREFIX", "/tmp/mm")
+            .env("MAMBA_ROOT_PREFIX", "/tmp/mm")
+            .config(toml::toml! {
+                [conda]
+                ignore_base = false
+            })
+            .collect();
+        let expected = Some(format!("via {} ", Color::Green.bold().paint("🅒 base")));
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn micromamba_root_path_default_env() {
+        let actual = ModuleRenderer::new("conda")
+            .env("CONDA_DEFAULT_ENV", "/tmp/mm")
+            .env("CONDA_PREFIX", "/tmp/mm")
+            .env("MAMBA_ROOT_PREFIX", "/tmp/mm/")
+            .collect();
+        assert_eq!(None, actual);
     }
 
     #[test]
