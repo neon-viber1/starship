@@ -7,6 +7,7 @@ use std::fmt::{Debug, Write as FmtWrite};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use terminal_size::terminal_size;
 use unicode_segmentation::UnicodeSegmentation;
@@ -70,7 +71,7 @@ fn test_grapheme_aware_width() {
 }
 
 pub fn prompt(args: Properties, target: Target) {
-    let context = Context::new(args, target);
+    let context = ContextGuard::new(Context::new(args, target));
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
@@ -84,6 +85,7 @@ pub fn prompt_with_claude_code(args: Properties, target: Target) {
 
     let mut context = Context::new(args, target).with_claude_code_data(claude_data);
     context.shell = Shell::Unknown;
+    let context = ContextGuard::new(context);
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
@@ -169,7 +171,7 @@ pub fn get_prompt(context: &Context) -> String {
 }
 
 pub fn module(module_name: &str, args: Properties) {
-    let context = Context::new(args, Target::Main);
+    let context = ContextGuard::new(Context::new(args, Target::Main));
     let module = get_module(module_name, &context).unwrap_or_default();
     print!("{module}");
 }
@@ -179,7 +181,7 @@ pub fn get_module(module_name: &str, context: &Context) -> Option<String> {
 }
 
 pub fn timings(args: Properties) {
-    let context = Context::new(args, Target::Main);
+    let context = ContextGuard::new(Context::new(args, Target::Main));
 
     struct ModuleTiming {
         name: String,
@@ -225,7 +227,7 @@ pub fn timings(args: Properties) {
 }
 
 pub fn explain(args: Properties) {
-    let context = Context::new(args, Target::Main);
+    let context = ContextGuard::new(Context::new(args, Target::Main));
 
     struct ModuleInfo {
         value: String,
@@ -916,20 +918,58 @@ fn run_with_timeout<T: Send + 'static>(
     rx.recv_timeout(timeout).ok()
 }
 
+/// Set once any module worker has been abandoned after exceeding `module_timeout`.
+static TIMED_OUT: AtomicBool = AtomicBool::new(false);
+
+/// Owns a `Context` and keeps it alive forever (leaks it) if a module worker was abandoned,
+/// because that worker may still hold a reference to the context.
+struct ContextGuard<'a>(std::mem::ManuallyDrop<Context<'a>>);
+
+impl<'a> ContextGuard<'a> {
+    fn new(context: Context<'a>) -> Self {
+        Self(std::mem::ManuallyDrop::new(context))
+    }
+}
+
+impl<'a> std::ops::Deref for ContextGuard<'a> {
+    type Target = Context<'a>;
+    fn deref(&self) -> &Context<'a> {
+        &self.0
+    }
+}
+
+impl<'a> std::ops::DerefMut for ContextGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Context<'a> {
+        &mut self.0
+    }
+}
+
+impl Drop for ContextGuard<'_> {
+    fn drop(&mut self) {
+        if !TIMED_OUT.load(Ordering::SeqCst) {
+            // SAFETY: no worker was abandoned, so nothing else references the context, and
+            // it is dropped exactly once here.
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.0) };
+        }
+    }
+}
+
 /// Like `modules::handle`, but gives up on modules that take longer than `module_timeout`.
 fn handle_with_timeout<'a>(module: &str, context: &'a Context) -> Option<Module<'a>> {
     let timeout = Duration::from_millis(context.root_config.module_timeout);
     if timeout.is_zero() {
         return modules::handle(module, context);
     }
+    // Remember that a worker may outlive this call; see `ContextGuard`.
     let ctx_addr = std::ptr::from_ref(context) as usize;
     let name = module.to_owned();
     let worker_name = name.clone();
     let result = run_with_timeout(timeout, move || {
-        // SAFETY: the context is only borrowed for the duration of the prompt. A worker that
-        // times out may outlive that borrow, but it is only ever abandoned while the process
-        // is about to print the prompt and exit, so the context is never dropped and reused
-        // while the worker still runs.
+        // SAFETY: the pointer comes from a live `&Context`. If this worker is abandoned
+        // after a timeout, `TIMED_OUT` is set and every owner of a `Context` in this crate
+        // (`ContextGuard`) leaks it instead of dropping it, so the memory stays valid for as
+        // long as the worker may run. Callers that build a `Context` themselves and use
+        // `handle_with_timeout` must do the same (tests wrap it in a `ContextGuard`).
         let ctx: &'static Context = unsafe { &*(ctx_addr as *const Context) };
         modules::handle(&worker_name, ctx)
     });
@@ -937,6 +977,7 @@ fn handle_with_timeout<'a>(module: &str, context: &'a Context) -> Option<Module<
         // SAFETY: shortens the lifetime back to the caller's borrow of the context.
         Some(m) => unsafe { std::mem::transmute::<Option<Module<'static>>, Option<Module<'a>>>(m) },
         None => {
+            TIMED_OUT.store(true, Ordering::SeqCst);
             log::warn!(
                 "Module '{name}' did not finish within module_timeout ({}ms) and was skipped. \
                  You can set module_timeout in your config to a higher value (or 0 to disable it).",
@@ -977,5 +1018,78 @@ mod timeout_tests {
             7
         });
         assert_eq!(r, Some(7));
+    }
+
+    fn slow_config(timeout: u64) -> toml::Table {
+        toml::toml! {
+            command_timeout = 100000
+            format = "${custom.slow}${custom.fast}"
+            [custom.slow]
+            command = "sleep 3; echo slow"
+            format = "$output"
+            shell = ["sh"]
+            when = true
+            [custom.fast]
+            command = "echo fast"
+            format = "$output"
+            shell = ["sh"]
+            when = true
+        }
+        .into_iter()
+        .chain([(
+            "module_timeout".to_owned(),
+            toml::Value::Integer(timeout as i64),
+        )])
+        .collect()
+    }
+
+    fn context_with(config: toml::Table, dir: &std::path::Path) -> ContextGuard<'static> {
+        ContextGuard::new(Context::from(
+            crate::test::ModuleRenderer::new("custom.fast")
+                .path(dir)
+                .config(config),
+        ))
+    }
+
+    #[test]
+    fn module_timeout_config_default_and_user_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(toml::Table::new(), dir.path());
+        assert_eq!(ctx.root_config.module_timeout, 5000);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(slow_config(123), dir.path());
+        assert_eq!(ctx.root_config.module_timeout, 123);
+    }
+
+    #[test]
+    fn fast_module_is_unaffected_by_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(slow_config(5000), dir.path());
+        let out = get_module("custom.fast", &ctx).unwrap();
+        assert!(out.contains("fast"), "{out:?}");
+    }
+
+    #[test]
+    fn slow_module_is_dropped_and_rest_of_prompt_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(slow_config(100), dir.path());
+        let start = std::time::Instant::now();
+        assert_eq!(get_module("custom.slow", &ctx), None);
+        let prompt = get_prompt(&ctx);
+        assert!(start.elapsed() < Duration::from_millis(2500));
+        assert!(prompt.contains("fast"), "{prompt:?}");
+        assert!(!prompt.contains("slow"), "{prompt:?}");
+        // The abandoned worker still references the context: the guard must leak it.
+        assert!(TIMED_OUT.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn zero_module_timeout_disables_limit() {
+        let mut config = slow_config(0);
+        config.insert("command_timeout".into(), toml::Value::Integer(100000));
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = context_with(config, dir.path());
+        let out = get_module("custom.fast", &ctx).unwrap();
+        assert!(out.contains("fast"));
     }
 }
