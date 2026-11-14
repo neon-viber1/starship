@@ -703,6 +703,19 @@ The `commands` option accepts a list of commands to determine the compiler versi
 
 Each command is represented as a list of the executable name, followed by its arguments, usually something like `['mycc', '--version']`. Starship will try executing each command until it gets a result on STDOUT.
 
+Commands are executed directly, not through a shell. Pipes, redirection, quoting and variable expansion are therefore not interpreted: an entry such as `['gcc --version | head -n 1']` is treated as the name of a single program and fails. To use a shell pipeline, run it through a shell explicitly and pass the whole pipeline, including `--version`, as one script string. The output must still be something the module can parse for the compiler name and version.
+
+```toml
+# ~/.config/starship.toml
+
+[c]
+commands = [
+  [ 'sh', '-c', '$(find-my-compiler) --version' ],
+]
+```
+
+For other shells, use their equivalent option, such as `nu -c` or `pwsh -Command`.
+
 If a C compiler is not supported by this module, you can request it by [raising an issue on GitHub](https://github.com/starship/starship/issues/new/choose).
 
 ### Example
@@ -751,6 +764,19 @@ the module will be shown if the current directory contains a `.cpp`, `.hpp`, or 
 The `commands` option accepts a list of commands to determine the compiler version and name.
 
 Each command is represented as a list of the executable name, followed by its arguments, usually something like `['mycpp', '--version']`. Starship will try executing each command until it gets a result on STDOUT.
+
+Commands are executed directly, not through a shell. Pipes, redirection, quoting and variable expansion are therefore not interpreted: an entry such as `['gcc --version | head -n 1']` is treated as the name of a single program and fails. To use a shell pipeline, run it through a shell explicitly and pass the whole pipeline, including `--version`, as one script string. The output must still be something the module can parse for the compiler name and version.
+
+```toml
+# ~/.config/starship.toml
+
+[cpp]
+commands = [
+  [ 'sh', '-c', '$(find-my-compiler) --version' ],
+]
+```
+
+For other shells, use their equivalent option, such as `nu -c` or `pwsh -Command`.
 
 If a C++ compiler is not supported by this module, you can request it by [raising an issue on GitHub](https://github.com/starship/starship/issues/new/choose).
 
