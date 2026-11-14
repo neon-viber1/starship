@@ -707,6 +707,7 @@
         "only_detached": true,
         "disabled": false,
         "tag_symbol": " 🏷  ",
+        "display_tag": false,
         "tag_disabled": true,
         "tag_max_candidates": 0
       }
@@ -3778,7 +3779,12 @@
           "type": "string",
           "default": " 🏷  "
         },
+        "display_tag": {
+          "type": "boolean",
+          "default": false
+        },
         "tag_disabled": {
+          "description": "Deprecated: use `display_tag` instead.",
           "type": "boolean",
           "default": true
         },
