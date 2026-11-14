@@ -1207,6 +1207,20 @@ it would have been `nixpkgs/pkgs`.
 | `home_symbol`            | `'~'`                                                                                                                        | The symbol indicating home directory.                                                                      |
 | `use_os_path_sep`        | `true`                                                                                                                       | Use the OS specific path separator instead of always using `/` (e.g. `\` on Windows)                       |
 
+::: tip
+
+When `repo_root_style` is defined and you are inside a git repository, `repo_root_format` is used instead of `format`. To place `$read_only` (or anything else) differently, change it in both options, for example:
+
+```toml
+# ~/.config/starship.toml
+
+[directory]
+format = '[$read_only]($read_only_style) [$path]($style) '
+repo_root_format = '[$read_only]($read_only_style) [$before_root_path]($before_repo_root_style)[$repo_root]($repo_root_style)[$path]($style) '
+```
+
+:::
+
 <details>
 <summary>This module has a few advanced configuration options that control how the directory is displayed.</summary>
 

@@ -1059,6 +1059,113 @@ mod tests {
         tmp_dir.close()
     }
 
+    #[cfg(unix)]
+    fn set_readonly_mode(path: &Path, readonly: bool) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            path,
+            fs::Permissions::from_mode(if readonly { 0o555 } else { 0o755 }),
+        )
+    }
+
+    const READ_ONLY_FIRST_FORMAT: &str = "[$read_only]($read_only_style) [$path]($style) ";
+    const READ_ONLY_FIRST_REPO_ROOT_FORMAT: &str = "[$read_only]($read_only_style) [$before_root_path]($before_repo_root_style)[$repo_root]($repo_root_style)[$path]($style) ";
+
+    #[test]
+    #[cfg(unix)]
+    fn read_only_symbol_before_path_outside_repo() -> io::Result<()> {
+        let tmp_dir = TempDir::new()?;
+        let dir = tmp_dir.path().join("locked");
+        fs::create_dir_all(&dir)?;
+        set_readonly_mode(&dir, true)?;
+        if !is_readonly_dir(&dir) {
+            // e.g. running as root: permissions are not enforced
+            set_readonly_mode(&dir, false)?;
+            return tmp_dir.close();
+        }
+
+        let actual = ModuleRenderer::new("directory")
+            .config(toml::toml! {
+                [directory]
+                format = "[$read_only]($read_only_style) [$path]($style) "
+                read_only = "RO"
+                read_only_style = ""
+                style = ""
+                truncation_length = 1
+                truncate_to_repo = false
+            })
+            .path(&dir)
+            .collect();
+        set_readonly_mode(&dir, false)?;
+
+        assert_eq!(Some("RO locked ".to_string()), actual);
+        tmp_dir.close()
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(unix)]
+    fn read_only_symbol_before_path_in_repo_with_both_formats() -> io::Result<()> {
+        let tmp_dir = TempDir::new()?;
+        let repo_dir = tmp_dir.path().join("rocket-controls");
+        fs::create_dir_all(&repo_dir)?;
+        init_repo(&repo_dir).unwrap();
+        set_readonly_mode(&repo_dir, true)?;
+        if !is_readonly_dir(&repo_dir) {
+            set_readonly_mode(&repo_dir, false)?;
+            return tmp_dir.close();
+        }
+
+        let actual = ModuleRenderer::new("directory")
+            .config(toml::toml! {
+                [directory]
+                format = READ_ONLY_FIRST_FORMAT
+                repo_root_format = READ_ONLY_FIRST_REPO_ROOT_FORMAT
+                read_only = "RO"
+                read_only_style = ""
+                style = ""
+                repo_root_style = ""
+            })
+            .path(&repo_dir)
+            .collect();
+        set_readonly_mode(&repo_dir, false)?;
+
+        assert_eq!(Some("RO rocket-controls ".to_string()), actual);
+        tmp_dir.close()
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(unix)]
+    fn read_only_symbol_trails_in_repo_with_only_format_customized() -> io::Result<()> {
+        let tmp_dir = TempDir::new()?;
+        let repo_dir = tmp_dir.path().join("rocket-controls");
+        fs::create_dir_all(&repo_dir)?;
+        init_repo(&repo_dir).unwrap();
+        set_readonly_mode(&repo_dir, true)?;
+        if !is_readonly_dir(&repo_dir) {
+            set_readonly_mode(&repo_dir, false)?;
+            return tmp_dir.close();
+        }
+
+        // Inside a repo `repo_root_format` is used, not `format`, once `repo_root_style` is set.
+        let actual = ModuleRenderer::new("directory")
+            .config(toml::toml! {
+                [directory]
+                format = READ_ONLY_FIRST_FORMAT
+                repo_root_style = ""
+                read_only = "RO"
+                read_only_style = ""
+                style = ""
+            })
+            .path(&repo_dir)
+            .collect();
+        set_readonly_mode(&repo_dir, false)?;
+
+        assert_eq!(Some("rocket-controlsRO ".to_string()), actual);
+        tmp_dir.close()
+    }
+
     #[test]
     #[ignore]
     fn directory_in_git_repo() -> io::Result<()> {
