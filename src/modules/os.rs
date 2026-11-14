@@ -1,7 +1,8 @@
 use super::{Context, Module, ModuleConfig};
 
 use crate::configs::os::OSConfig;
-use crate::formatter::StringFormatter;
+use crate::formatter::{StringFormatter, VariableHolder};
+use std::sync::OnceLock;
 
 /// Creates a module with the current operating system
 pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
@@ -13,31 +14,11 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     }
 
     #[cfg(not(test))]
-    let os = os_info::get();
-
+    let detect = os_info::get;
     #[cfg(test)]
-    let os = os_info::Info::default();
+    let detect = os_info::Info::default;
 
-    let parsed = StringFormatter::new(config.format).and_then(|formatter| {
-        formatter
-            .map_meta(|variable, _| match variable {
-                "symbol" => get_symbol(&config, os.os_type()),
-                _ => None,
-            })
-            .map_style(|variable| match variable {
-                "style" => Some(Ok(config.style)),
-                _ => None,
-            })
-            .map(|variable| match variable {
-                "codename" => get_codename(&os).map(Ok),
-                "edition" => get_edition(&os).map(Ok),
-                "name" => get_name(&os).map(Ok),
-                "type" => get_type(&os).map(Ok),
-                "version" => get_version(&os).map(Ok),
-                _ => None,
-            })
-            .parse(None, Some(context))
-    });
+    let parsed = render(&config, context, quick_type(), detect);
     module.set_segments(match parsed {
         Ok(segments) => segments,
         Err(error) => {
@@ -47,6 +28,57 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     });
 
     Some(module)
+}
+
+/// Variables that require the full (potentially slow) OS information.
+const FULL_INFO_VARIABLES: [&str; 3] = ["codename", "edition", "version"];
+
+/// Cheap OS type detection that avoids spawning subprocesses where possible.
+fn quick_type() -> Option<os_info::Type> {
+    if cfg!(all(target_os = "macos", not(test))) {
+        Some(os_info::Type::Macos)
+    } else {
+        None
+    }
+}
+
+fn render<'a>(
+    config: &'a OSConfig,
+    context: &'a Context,
+    quick: Option<os_info::Type>,
+    detect: impl Fn() -> os_info::Info + Sync,
+) -> Result<Vec<crate::segment::Segment>, crate::formatter::string_formatter::StringFormatterError>
+{
+    let formatter = StringFormatter::new(config.format)?;
+    let needs_full = formatter
+        .get_variables()
+        .iter()
+        .any(|v| FULL_INFO_VARIABLES.contains(&v.as_str()));
+    let quick = quick.filter(|_| !needs_full);
+
+    // Detect at most once per render, and only when actually needed.
+    let info = OnceLock::new();
+    let info = || info.get_or_init(&detect);
+    let os_type = || quick.unwrap_or_else(|| info().os_type());
+
+    formatter
+        .map_meta(|variable, _| match variable {
+            "symbol" => get_symbol(config, os_type()),
+            _ => None,
+        })
+        .map_style(|variable| match variable {
+            "style" => Some(Ok(config.style)),
+            _ => None,
+        })
+        .map(|variable| match variable {
+            "codename" => get_codename(info()).map(Ok),
+            "edition" => get_edition(info()).map(Ok),
+            "name" => Some(Ok(os_type().to_string())),
+            "type" => Some(Ok(format!("{:?}", os_type()))),
+            "version" => get_version(info()).map(Ok),
+            _ => None,
+        })
+        .parse(None, Some(context))
 }
 
 // Get the operating system symbol from user config, or else default config
@@ -63,15 +95,6 @@ fn get_codename(os: &os_info::Info) -> Option<String> {
 
 fn get_edition(os: &os_info::Info) -> Option<String> {
     os.edition().map(String::from)
-}
-
-fn get_name(os: &os_info::Info) -> Option<String> {
-    Some(os.os_type().to_string())
-}
-
-fn get_type(os: &os_info::Info) -> Option<String> {
-    // String from os_info::Type
-    Some(format!("{:?}", os.os_type()))
 }
 
 fn get_version(os: &os_info::Info) -> Option<String> {
@@ -392,5 +415,27 @@ mod tests {
             Type::Zorin => "🔹 ",
             _ => "",
         };
+    }
+
+    #[test]
+    fn lazy_detection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let ctx = crate::test::default_context();
+        let count = AtomicUsize::new(0);
+        let detect = || {
+            count.fetch_add(1, Ordering::SeqCst);
+            os_info::Info::default()
+        };
+        let mut config = OSConfig {
+            format: "[$symbol]($style)",
+            ..Default::default()
+        };
+        let _ = render(&config, &ctx, Some(Type::Macos), detect);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        count.store(0, Ordering::SeqCst);
+        count.store(0, Ordering::SeqCst);
+        config.format = "$symbol $version $codename $edition $name $type";
+        let _ = render(&config, &ctx, Some(Type::Macos), detect);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }
