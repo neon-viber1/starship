@@ -11,6 +11,7 @@ $git_branch\
 $git_status\
 [](fg:yellow bg:green)\
 $c\
+$cpp\
 $rust\
 $golang\
 $nodejs\
@@ -21,7 +22,9 @@ $kotlin\
 $haskell\
 $python\
 [](fg:green bg:sapphire)\
+$docker_context\
 $conda\
+$pixi\
 [](fg:sapphire bg:lavender)\
 $time\
 [ ](fg:lavender)\
@@ -52,11 +55,13 @@ Android = " "
 AOSC = " "
 Arch = "󰣇 "
 Artix = "󰣇 "
+EndeavourOS = " "
 CachyOS = " "
 CentOS = " "
 Debian = "󰣚 "
 Redhat = "󱄛 "
 RedHatEnterprise = "󱄛 "
+Pop = " "
 Void = " "
 
 [username]
@@ -99,6 +104,12 @@ format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
 
 [c]
 symbol = " "
+style = "bg:green"
+format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
+
+[cpp]
+disabled = false
+symbol = " "
 style = "bg:green"
 format = '[[ $symbol( $version) ](fg:crust bg:green)]($style)'
 
@@ -156,6 +167,10 @@ symbol = "  "
 style = "fg:crust bg:sapphire"
 format = '[$symbol$environment ]($style)'
 ignore_base = false
+
+[pixi]
+style = "bg:sapphire"
+format = '[[ $symbol( $version)( $environment) ](fg:crust bg:sapphire)]($style)'
 
 [time]
 disabled = false
