@@ -92,12 +92,14 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
             dir_string
         };
 
+    let mut fish_prefix_used = false;
     let prefix = if is_truncated {
         // Substitutions could have changed the prefix, so don't allow them and
         // fish-style path contraction together
         if config.fish_style_pwd_dir_length > 0 && config.substitutions_empty() {
             // If user is using fish style path, we need to add the segment first
             let contracted_home_dir = contract_path(display_dir, &home_dir, config.home_symbol);
+            fish_prefix_used = true;
             to_fish_style(
                 config.fish_style_pwd_dir_length as usize,
                 &contracted_home_dir,
@@ -114,28 +116,51 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     // highlight and the logical path actually lies under it. A symlink pointing
     // sideways into a subdirectory of the repo resolves into it without sharing
     // a prefix with it, so it has no contracted form and is not split.
-    let split_at_repo_root = repo
+    let contracted_repo_path = repo
         .and_then(|r| r.workdir.as_ref())
         .filter(|_| config.repo_root_style.is_some())
-        .and_then(|repo_root| contract_repo_path(display_dir, repo_root))
-        .and_then(|contracted_path| {
-            let repo_path_vec: Vec<&str> = contracted_path.split('/').collect();
-            let after_repo_root = contracted_path.replacen(repo_path_vec[0], "", 1);
-            let num_segments_after_root = after_repo_root.split('/').count();
+        .and_then(|repo_root| contract_repo_path(display_dir, repo_root));
 
-            (config.truncation_length == 0
-                || ((num_segments_after_root - 1) as i64) < config.truncation_length)
-                .then(|| {
-                    [
-                        before_root_dir(&dir_string, &contracted_path).to_string(),
-                        repo_path_vec[0].to_string(),
-                        after_repo_root,
-                    ]
-                })
-        });
+    let split_in_window = contracted_repo_path.as_ref().and_then(|contracted_path| {
+        let repo_path_vec: Vec<&str> = contracted_path.split('/').collect();
+        let after_repo_root = contracted_path.replacen(repo_path_vec[0], "", 1);
+        let num_segments_after_root = after_repo_root.split('/').count();
 
-    let path_vec = match split_at_repo_root {
-        Some([before_root, root, after_root]) => [prefix + &before_root, root, after_root],
+        (config.truncation_length == 0
+            || ((num_segments_after_root - 1) as i64) < config.truncation_length)
+            .then(|| {
+                [
+                    prefix.clone() + before_root_dir(&dir_string, contracted_path),
+                    repo_path_vec[0].to_string(),
+                    after_repo_root,
+                ]
+            })
+    });
+
+    // When the repo root was cut off by truncation but is still shown in the
+    // fish-style shortened prefix, split the prefix around it instead.
+    let split_in_fish_prefix = || -> Option<[String; 3]> {
+        if !fish_prefix_used {
+            return None;
+        }
+        let num_after_root = contracted_repo_path.as_ref()?.split('/').count() - 1;
+        let window = usize::try_from(config.truncation_length).ok()?;
+        let parts: Vec<&str> = prefix.split('/').collect();
+        let idx = (parts.len() + window).checked_sub(num_after_root + 2)?;
+        if idx + 1 >= parts.len() || parts[idx].is_empty() {
+            return None;
+        }
+        let before = parts[..idx].iter().map(|p| format!("{p}/")).collect();
+        let after = parts[idx + 1..].join("/");
+        Some([
+            before,
+            parts[idx].to_string(),
+            format!("/{after}{dir_string}"),
+        ])
+    };
+
+    let path_vec = match split_in_window.or_else(split_in_fish_prefix) {
+        Some(split) => split,
         // the whole path in one segment, with no repo root to highlight
         None => [String::new(), String::new(), prefix + dir_string.as_str()],
     };
@@ -1127,6 +1152,32 @@ mod tests {
         ));
 
         assert_eq!(expected, actual);
+        tmp_dir.close()
+    }
+
+    #[test]
+    #[ignore]
+    fn fish_style_shortened_repo_root_keeps_repo_root_style() -> io::Result<()> {
+        let (tmp_dir, _) = make_known_tempdir(Path::new("/tmp"))?;
+        let repo_dir = tmp_dir.path().join("above-repo").join("rocket-controls");
+        let dir = repo_dir.join("src/meters/fuel-gauge");
+        fs::create_dir_all(&dir)?;
+        init_repo(&repo_dir).unwrap();
+
+        let actual = ModuleRenderer::new("directory")
+            .config(toml::toml! {
+                [directory]
+                truncation_length = 3
+                truncate_to_repo = false
+                fish_style_pwd_dir_length = 2
+                repo_root_style = "bg:red"
+                before_repo_root_style = "bold blue"
+            })
+            .path(dir)
+            .collect()
+            .unwrap();
+        assert!(actual.contains("\x1b[41mro\x1b[0m"), "{actual:?}");
+        assert!(actual.contains("\x1b[1;34m"), "{actual:?}");
         tmp_dir.close()
     }
 
