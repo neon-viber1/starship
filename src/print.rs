@@ -878,4 +878,48 @@ mod test {
         let actual = get_prompt(&context);
         assert_eq!(expected, actual);
     }
+
+    fn custom_then_arrow_prompt(command: &str) -> String {
+        let config: toml::Table = toml::from_str(&format!(
+            r#"
+            add_newline = false
+            format = "${{custom.test}}[x](fg:red)$character"
+            [character]
+            format = "[> ](fg:green)"
+            [custom.test]
+            format = "[a]($style)[ $output ]($style)[b]($style)"
+            style = "bg:blue"
+            command = '''{command}'''
+            when = true
+            ignore_timeout = true
+            "#
+        ))
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let context: Context = crate::test::ModuleRenderer::new("custom.test")
+            .path(dir.path())
+            .config(config)
+            .shell(Shell::Bash)
+            .into();
+        let prompt = get_prompt(&context);
+        dir.close().unwrap();
+        prompt
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn custom_output_style_does_not_leak_into_next_segment() {
+        // Plain output: one style run covers all three segments; the next
+        // global-format segment keeps its own style.
+        assert_eq!(
+            "\\[\x1b[44m\\]a NAV b\\[\x1b[0m\\]\\[\x1b[31m\\]x\\[\x1b[32m\\]> \\[\x1b[0m\\]",
+            custom_then_arrow_prompt("echo NAV")
+        );
+        // Output with its own colors and reset: the module style is restored
+        // for the text after it, and the next segment is unaffected.
+        assert_eq!(
+            "\\[\x1b[44m\\]a \\[\x1b[32m\\]NAV\\[\x1b[0m\\]\\[\x1b[44m\\] b\\[\x1b[0m\\]\\[\x1b[31m\\]x\\[\x1b[32m\\]> \\[\x1b[0m\\]",
+            custom_then_arrow_prompt(r"printf '\033[32mNAV\033[0m'")
+        );
+    }
 }
