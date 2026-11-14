@@ -58,9 +58,16 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
         None
     };
     let dir_string = if config.truncate_to_repo {
-        repo.and_then(|r| r.workdir.as_ref())
-            .filter(|&root| root != &home_dir)
-            .and_then(|root| contract_repo_path(display_dir, root))
+        repo.and_then(|r| r.workdir.as_ref().map(|root| (r, root)))
+            .filter(|&(_, root)| root != &home_dir)
+            .and_then(|(r, root)| {
+                let contracted = contract_repo_path(display_dir, root)?;
+                // In a linked worktree, keep the main repository's name visible.
+                Some(match linked_worktree_repo_name(r, root) {
+                    Some(name) => format!("{name}/{contracted}"),
+                    None => contracted,
+                })
+            })
     } else {
         None
     };
@@ -249,6 +256,43 @@ fn contract_path<'a>(
         separator = "/",
         path = sub_path.to_slash_lossy()
     ))
+}
+
+/// Resolve `.` and `..` components without touching the filesystem.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Name of the main repository when `repo` is a linked worktree.
+///
+/// Returns `None` for regular repositories, or if no name can be derived or the
+/// name equals the worktree folder name.
+fn linked_worktree_repo_name(repo: &crate::context::GitRepo, workdir: &Path) -> Option<String> {
+    let thread_repo = repo.repo.to_thread_local();
+    let common_dir = lexical_normalize(thread_repo.common_dir());
+    if common_dir == lexical_normalize(thread_repo.git_dir()) {
+        return None;
+    }
+    let dir_name = common_dir.file_name()?.to_str()?;
+    let name = if matches!(dir_name, ".git" | ".bare") {
+        common_dir.parent()?.file_name()?.to_str()?
+    } else {
+        dir_name.strip_suffix(".git").unwrap_or(dir_name)
+    };
+    if name.is_empty() || Some(name) == workdir.file_name().and_then(|n| n.to_str()) {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 /// Contract the root component of a path based on the real path
@@ -550,6 +594,98 @@ mod tests {
             .current_dir(path)
             .output()
             .map(|_| ())
+    }
+
+    #[test]
+    #[ignore]
+    fn worktree_shows_main_repo_name() -> io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let main = tmp.path().join("rocket");
+        fs::create_dir_all(&main)?;
+        init_repo(&main)?;
+        let git = |args: &[&str], dir: &Path| {
+            create_command("git")
+                .unwrap()
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+        };
+        git(&["commit", "--allow-empty", "-m", "init"], &main);
+        let wt = tmp.path().join("wt");
+        git(&["worktree", "add", wt.to_str().unwrap()], &main);
+        fs::create_dir_all(wt.join("src"))?;
+        let actual = ModuleRenderer::new("directory")
+            .path(wt.join("src"))
+            .collect();
+        assert_eq!(
+            actual,
+            Some(format!("{} ", Color::Cyan.bold().paint("rocket/wt/src")))
+        );
+        let actual = ModuleRenderer::new("directory").path(&main).collect();
+        assert_eq!(
+            actual,
+            Some(format!("{} ", Color::Cyan.bold().paint("rocket")))
+        );
+        tmp.close()
+    }
+
+    #[test]
+    #[ignore]
+    fn bare_layout_worktree_shows_repo_name() -> io::Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(&root)?;
+        let git = |args: &[&str], dir: &Path| {
+            create_command("git")
+                .unwrap()
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "--bare", ".bare"], &root);
+        git(
+            &["--git-dir=.bare", "symbolic-ref", "HEAD", "refs/heads/main"],
+            &root,
+        );
+        // create a root commit in the bare repo
+        let tree = git(
+            &[
+                "--git-dir=.bare",
+                "hash-object",
+                "-t",
+                "tree",
+                "-w",
+                "/dev/null",
+            ],
+            &root,
+        );
+        let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+        let commit = git(
+            &["--git-dir=.bare", "commit-tree", &tree, "-m", "init"],
+            &root,
+        );
+        let commit = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+        git(
+            &["--git-dir=.bare", "update-ref", "refs/heads/main", &commit],
+            &root,
+        );
+        git(
+            &["--git-dir=.bare", "worktree", "add", "main", "main"],
+            &root,
+        );
+        fs::create_dir_all(root.join("main").join("src"))?;
+        let actual = ModuleRenderer::new("directory")
+            .path(root.join("main").join("src"))
+            .collect();
+        assert_eq!(
+            actual,
+            Some(format!("{} ", Color::Cyan.bold().paint("proj/main/src")))
+        );
+        tmp.close()
     }
 
     fn make_known_tempdir(root: &Path) -> io::Result<(TempDir, String)> {

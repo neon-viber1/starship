@@ -1207,6 +1207,8 @@ it would have been `nixpkgs/pkgs`.
 | `home_symbol`            | `'~'`                                                                                                                        | The symbol indicating home directory.                                                                      |
 | `use_os_path_sep`        | `true`                                                                                                                       | Use the OS specific path separator instead of always using `/` (e.g. `\` on Windows)                       |
 
+When inside a linked git worktree (created with `git worktree add`), the name of the main repository is shown before the worktree folder, e.g. `repo/main/src` instead of `main/src`.
+
 <details>
 <summary>This module has a few advanced configuration options that control how the directory is displayed.</summary>
 
