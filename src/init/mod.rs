@@ -320,4 +320,15 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn cmd_init_strips_trailing_newline() {
+        assert!(CMDEXE_INIT.contains("local function strip_trailing_newline"));
+        assert_eq!(
+            CMDEXE_INIT
+                .matches("return strip_trailing_newline(io.popen(")
+                .count(),
+            2
+        );
+    }
 }

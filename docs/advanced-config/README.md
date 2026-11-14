@@ -29,6 +29,10 @@ Invoke-Expression (&starship init powershell)
 Enable-TransientPrompt
 ```
 
+## Trailing newline in Cmd
+
+When using Clink, a single trailing newline at the end of `format` (or `right_format`) is removed, so the cursor stays directly after the last character of the prompt.
+
 ## TransientPrompt and TransientRightPrompt in Cmd
 
 Clink allows you to replace the previous-printed prompt with custom strings. This
