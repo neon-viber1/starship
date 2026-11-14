@@ -345,6 +345,25 @@ Note: Continuation prompts are only available in the following shells:
 continuation_prompt = '▶▶ '
 ```
 
+### PowerShell in VS Code
+
+When PowerShell runs inside the VS Code integrated terminal, a stray `\x1b[0m` may be printed at the top of the terminal. This happens because VS Code's shell integration script reads the continuation prompt and writes it to the terminal. If the console output encoding is not UTF-8, the non-ASCII default `∙` is mangled and the escape sequence breaks. The cause is in VS Code's script, not Starship's prompt rendering.
+
+To work around it, set the console output encoding to UTF-8 before initializing Starship in your `$PROFILE`:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Invoke-Expression (&starship init powershell)
+```
+
+Alternatively, use an ASCII-only continuation prompt:
+
+```toml
+# ~/.config/starship.toml
+
+continuation_prompt = '. '
+```
+
 ## Statusline for Claude Code
 
 Starship supports displaying a custom statusline when running inside Claude Code, Anthropic's CLI tool for interactive coding with Claude. This statusline provides real-time information about your Claude session, including the model being used, context window usage, and session costs.
