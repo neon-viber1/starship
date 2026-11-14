@@ -3812,6 +3812,10 @@ OS information is detected via the [os_info](https://lib.rs/crates/os_info) crat
 > [!WARNING]
 > The [os_info](https://lib.rs/crates/os_info) crate used by this module is known to be inaccurate on some systems.
 
+> [!NOTE]
+> On some platforms (notably macOS), querying `$codename`, `$edition` or `$version` requires running system commands and can be slow.
+> `$symbol`, `$name` and `$type` are fast; avoid the slower variables in `format` if prompt speed matters.
+
 > [!TIP]
 > This module is disabled by default.
 > To enable it, set `disabled` to `false` in your configuration file.
