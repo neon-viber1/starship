@@ -25,6 +25,19 @@ mod tests {
     }
 
     #[test]
+    fn folder_with_c_file_in_subfolder_only() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let sub = dir.path().join("dwm");
+        std::fs::create_dir(&sub)?;
+        File::create(sub.join("main.c"))?.sync_all()?;
+
+        let actual = ModuleRenderer::new("c").path(dir.path()).collect();
+
+        assert_eq!(None, actual);
+        dir.close()
+    }
+
+    #[test]
     fn folder_with_c_file() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         File::create(dir.path().join("any.c"))?.sync_all()?;
